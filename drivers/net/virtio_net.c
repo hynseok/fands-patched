@@ -23,6 +23,7 @@
 #include <net/xdp.h>
 #include <net/net_failover.h>
 #include <linux/dma-iommu.h>
+#include <linux/atomic.h>
 
 static int napi_weight = NAPI_POLL_WEIGHT;
 module_param(napi_weight, int, 0444);
@@ -307,6 +308,7 @@ struct padded_vnet_hdr {
 
 static void virtnet_rq_free_unused_buf(struct virtqueue *vq, void *buf);
 static void virtnet_sq_free_unused_buf(struct virtqueue *vq, void *buf);
+static void virtnet_release_batch(struct virtnet_info *vi, struct page *page);
 
 static bool is_xdp_frame(void *ptr)
 {
