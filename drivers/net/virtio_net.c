@@ -21,7 +21,7 @@
 #include <linux/kernel.h>
 #include <net/route.h>
 #include <net/xdp.h>
-#include <linux/net_failover.h>
+#include <net/net_failover.h>
 #include <linux/dma-iommu.h>
 
 static int napi_weight = NAPI_POLL_WEIGHT;
