@@ -21,7 +21,8 @@
 #include <linux/kernel.h>
 #include <net/route.h>
 #include <net/xdp.h>
-#include <net/net_failover.h>
+#include <linux/net_failover.h>
+#include <linux/dma-iommu.h>
 
 static int napi_weight = NAPI_POLL_WEIGHT;
 module_param(napi_weight, int, 0444);
@@ -141,6 +142,12 @@ struct send_queue {
 };
 
 /* Internal representation of a receive virtqueue */
+struct iova_batch {
+	dma_addr_t iova_base;
+	size_t size;
+	atomic_t ref;
+};
+
 struct receive_queue {
 	/* Virtqueue associated with this receive_queue */
 	struct virtqueue *vq;
@@ -170,6 +177,11 @@ struct receive_queue {
 	char name[40];
 
 	struct xdp_rxq_info xdp_rxq;
+
+	struct iova_batch *cur_batch;
+	u32 batch_offset;
+	unsigned long last_mapped_pfn;
+	dma_addr_t last_mapped_iova;
 };
 
 /* This structure can contain rss message with maximum settings for indirection table and keysize
@@ -740,6 +752,7 @@ static struct page *xdp_linearize_page(struct receive_queue *rq,
 			goto err_buf;
 
 		p = virt_to_head_page(buf);
+		virtnet_release_batch(rq->vq->vdev->priv, p);
 		off = buf - page_address(p);
 
 		/* guard against a misconfigured or uncooperative backend that
@@ -1401,6 +1414,9 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 	void *ctx;
 	int err;
 	unsigned int len, hole;
+	struct iova_batch *batch;
+	dma_addr_t iova;
+	unsigned long pfn;
 
 	/* Extra tailroom is needed to satisfy XDP's assumption. This
 	 * means rx frags coalescing won't work, but consider we've
@@ -1424,11 +1440,73 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 		alloc_frag->offset += hole;
 	}
 
-	sg_init_one(rq->sg, buf, len);
+	batch = rq->cur_batch;
+	if (!batch || rq->batch_offset >= batch->size) {
+		dma_addr_t iova_base;
+		
+		batch = kzalloc(sizeof(*batch), gfp);
+		if (!batch) {
+			put_page(virt_to_head_page(buf));
+			return -ENOMEM;
+		}
+
+		iova_base = iommu_dma_alloc_iova(iommu_get_dma_domain(vi->vdev->dev.parent),
+						 64 * PAGE_SIZE,
+						 dma_get_mask(vi->vdev->dev.parent),
+						 vi->vdev->dev.parent);
+		if (!iova_base) {
+			kfree(batch);
+			put_page(virt_to_head_page(buf));
+			return -ENOMEM;
+		}
+
+		batch->iova_base = iova_base;
+		batch->size = 64 * PAGE_SIZE;
+		atomic_set(&batch->ref, 0);
+		rq->cur_batch = batch;
+		rq->batch_offset = 0;
+	}
+
+	pfn = page_to_pfn(virt_to_page(buf));
+	
+	if (rq->last_mapped_pfn != pfn) {
+		dma_addr_t map_iova = batch->iova_base + rq->batch_offset;
+		dma_addr_t mapped_addr;
+		
+		mapped_addr = dma_map_page_attrs_iova(vi->vdev->dev.parent,
+						      virt_to_page(buf),
+						      map_iova,
+						      rq->batch_offset == 0,
+						      0,
+						      PAGE_SIZE,
+						      DMA_FROM_DEVICE,
+						      DMA_ATTR_SKIP_CPU_SYNC);
+		
+		if (dma_mapping_error(vi->vdev->dev.parent, mapped_addr)) {
+			put_page(virt_to_head_page(buf));
+			return -ENOMEM;
+		}
+		
+		rq->last_mapped_pfn = pfn;
+		rq->last_mapped_iova = map_iova;
+		rq->batch_offset += PAGE_SIZE;
+	}
+	
+	atomic_inc(&batch->ref);
+	/* We can safely use page->private because for mergeable buffers
+	 * it is not used by the driver (only for big packets in give_pages).
+	 * And we clear it in virtnet_receive before calling page_to_skb.
+	 */
+	virt_to_head_page(buf)->private = (unsigned long)batch;
+
+	iova = rq->last_mapped_iova + offset_in_page(buf);
+
 	ctx = mergeable_len_to_ctx(len, headroom);
-	err = virtqueue_add_inbuf_ctx(rq->vq, rq->sg, 1, buf, ctx, gfp);
-	if (err < 0)
+	err = virtqueue_add_inbuf_premapped(rq->vq, iova, len, buf, ctx, gfp);
+	if (err < 0) {
 		put_page(virt_to_head_page(buf));
+		virtnet_release_batch(vi, virt_to_head_page(buf));
+	}
 
 	return err;
 }
@@ -1536,6 +1614,25 @@ static void refill_work(struct work_struct *work)
 	}
 }
 
+static void virtnet_release_batch(struct virtnet_info *vi, struct page *page)
+{
+	struct iova_batch *batch = (struct iova_batch *)page->private;
+
+	if (batch) {
+		page->private = 0;
+		if (atomic_dec_and_test(&batch->ref)) {
+			dma_unmap_page_attrs_iova(vi->vdev->dev.parent,
+						  batch->iova_base,
+						  batch->size,
+						  batch->size,
+						  true,
+						  DMA_FROM_DEVICE,
+						  DMA_ATTR_SKIP_CPU_SYNC);
+			kfree(batch);
+		}
+	}
+}
+
 static int virtnet_receive(struct receive_queue *rq, int budget,
 			   unsigned int *xdp_xmit)
 {
@@ -1550,6 +1647,7 @@ static int virtnet_receive(struct receive_queue *rq, int budget,
 
 		while (stats.packets < budget &&
 		       (buf = virtqueue_get_buf_ctx(rq->vq, &len, &ctx))) {
+			virtnet_release_batch(vi, virt_to_head_page(buf));
 			receive_buf(vi, rq, buf, len, ctx, xdp_xmit, &stats);
 			stats.packets++;
 		}
@@ -3379,9 +3477,10 @@ static void virtnet_rq_free_unused_buf(struct virtqueue *vq, void *buf)
 	struct virtnet_info *vi = vq->vdev->priv;
 	int i = vq2rxq(vq);
 
-	if (vi->mergeable_rx_bufs)
+	if (vi->mergeable_rx_bufs) {
+		virtnet_release_batch(vi, virt_to_head_page(buf));
 		put_page(virt_to_head_page(buf));
-	else if (vi->big_packets)
+	} else if (vi->big_packets)
 		give_pages(&vi->rq[i], buf);
 	else
 		put_page(virt_to_head_page(buf));

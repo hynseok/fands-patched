@@ -78,6 +78,8 @@ struct vring_desc_state_packed {
 	u16 last;			/* The last desc state in a list. */
 };
 
+#define VRING_DESC_F_PREMAPPED (1<<14)
+
 struct vring_desc_extra {
 	dma_addr_t addr;		/* Descriptor DMA addr. */
 	u32 len;			/* Descriptor length. */
@@ -733,12 +735,14 @@ static void detach_buf_split(struct vring_virtqueue *vq, unsigned int head,
 	i = head;
 
 	while (vq->split.vring.desc[i].flags & nextflag) {
-		vring_unmap_one_split(vq, i);
+		if (!(vq->split.desc_extra[i].flags & VRING_DESC_F_PREMAPPED))
+			vring_unmap_one_split(vq, i);
 		i = vq->split.desc_extra[i].next;
 		vq->vq.num_free++;
 	}
 
-	vring_unmap_one_split(vq, i);
+	if (!(vq->split.desc_extra[i].flags & VRING_DESC_F_PREMAPPED))
+		vring_unmap_one_split(vq, i);
 	vq->split.desc_extra[i].next = vq->free_head;
 	vq->free_head = head;
 
@@ -2167,6 +2171,105 @@ int virtqueue_add_inbuf(struct virtqueue *vq,
 	return virtqueue_add(vq, &sg, num, 0, 1, data, NULL, gfp);
 }
 EXPORT_SYMBOL_GPL(virtqueue_add_inbuf);
+
+static inline int virtqueue_add_split_premapped(struct virtqueue *_vq,
+					      dma_addr_t addr,
+					      unsigned int len,
+					      void *data,
+					      void *ctx,
+					      gfp_t gfp)
+{
+	struct vring_virtqueue *vq = to_vvq(_vq);
+	struct vring_desc *desc;
+	unsigned int i, avail, descs_used, prev;
+	int head;
+
+	START_USE(vq);
+
+	BUG_ON(data == NULL);
+	BUG_ON(ctx && vq->indirect);
+
+	if (unlikely(vq->broken)) {
+		END_USE(vq);
+		return -EIO;
+	}
+
+	LAST_ADD_TIME_UPDATE(vq);
+
+	head = vq->free_head;
+
+	/* We assume single buffer for premapped */
+	desc = vq->split.vring.desc;
+	i = head;
+	descs_used = 1;
+
+	if (unlikely(vq->vq.num_free < descs_used)) {
+		pr_debug("Can't add buf len %i - avail = %i\n",
+			 descs_used, vq->vq.num_free);
+		END_USE(vq);
+		return -ENOSPC;
+	}
+
+	prev = i;
+	i = virtqueue_add_desc_split(_vq, desc, i, addr, len,
+				     VRING_DESC_F_WRITE,
+				     false);
+
+	vq->split.desc_extra[prev].flags |= VRING_DESC_F_PREMAPPED;
+
+	/* Last one doesn't continue. */
+	desc[prev].flags &= cpu_to_virtio16(_vq->vdev, ~VRING_DESC_F_NEXT);
+	if (vq->use_dma_api)
+		vq->split.desc_extra[prev & (vq->split.vring.num - 1)].flags &=
+			~VRING_DESC_F_NEXT;
+
+	/* We're using some buffers from the free list. */
+	vq->vq.num_free -= descs_used;
+
+	/* Update free pointer */
+	vq->free_head = i;
+
+	/* Store token and indirect buffer state. */
+	vq->split.desc_state[head].data = data;
+	vq->split.desc_state[head].indir_desc = ctx;
+
+	/* Put entry in available array (but don't update avail->idx until they
+	 * do sync). */
+	avail = vq->split.avail_idx_shadow & (vq->split.vring.num - 1);
+	vq->split.vring.avail->ring[avail] = cpu_to_virtio16(_vq->vdev, head);
+
+	/* Descriptors and available array need to be set before we expose the
+	 * new available array entries. */
+	virtio_wmb(vq->weak_barriers);
+	vq->split.avail_idx_shadow++;
+	vq->split.vring.avail->idx = cpu_to_virtio16(_vq->vdev,
+						vq->split.avail_idx_shadow);
+	vq->num_added++;
+
+	pr_debug("Added buffer head %i to %p\n", head, vq);
+	END_USE(vq);
+
+	/* This is very unlikely, but theoretically possible.  Kick
+	 * just in case. */
+	if (unlikely(vq->num_added == (1 << 16) - 1))
+		virtqueue_kick(_vq);
+
+	return 0;
+}
+
+int virtqueue_add_inbuf_premapped(struct virtqueue *vq,
+				  dma_addr_t addr, unsigned int len,
+				  void *data,
+				  void *ctx,
+				  gfp_t gfp)
+{
+	/* Only support split ring for now */
+	if (to_vvq(vq)->packed_ring)
+		return -EIO;
+
+	return virtqueue_add_split_premapped(vq, addr, len, data, ctx, gfp);
+}
+EXPORT_SYMBOL_GPL(virtqueue_add_inbuf_premapped);
 
 /**
  * virtqueue_add_inbuf_ctx - expose input buffers to other end
