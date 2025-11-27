@@ -310,7 +310,7 @@ struct padded_vnet_hdr {
 
 static void virtnet_rq_free_unused_buf(struct virtqueue *vq, void *buf);
 static void virtnet_sq_free_unused_buf(struct virtqueue *vq, void *buf);
-static void virtnet_release_batch(struct virtnet_info *vi, struct page *page);
+static void virtnet_release_batch(struct receive_queue *rq, struct page *page);
 
 static bool is_xdp_frame(void *ptr)
 {
@@ -1559,7 +1559,7 @@ have_buf:
 	err = virtqueue_add_inbuf_premapped(rq->vq, iova, len, buf, ctx, gfp);
 	if (err < 0) {
 		put_page(virt_to_head_page(buf));
-		virtnet_release_batch(vi, virt_to_head_page(buf));
+		virtnet_release_batch(rq, virt_to_head_page(buf));
 	}
 
 	return err;
@@ -1668,13 +1668,16 @@ static void refill_work(struct work_struct *work)
 	}
 }
 
-static void virtnet_release_batch(struct virtnet_info *vi, struct page *page)
+static void virtnet_release_batch(struct receive_queue *rq, struct page *page)
 {
+	struct virtnet_info *vi = rq->vq->vdev->priv;
 	struct iova_batch *batch = (struct iova_batch *)page->private;
 
 	if (batch) {
-		page->private = 0;
 		if (atomic_dec_and_test(&batch->ref)) {
+			page->private = 0;
+			if (rq->cur_batch == batch)
+				rq->cur_batch = NULL;
 			if (batch->is_huge) {
 				dma_unmap_page_attrs(vi->vdev->dev.parent,
 						     batch->iova_base,
@@ -1710,7 +1713,7 @@ static int virtnet_receive(struct receive_queue *rq, int budget,
 
 		while (stats.packets < budget &&
 		       (buf = virtqueue_get_buf_ctx(rq->vq, &len, &ctx))) {
-			virtnet_release_batch(vi, virt_to_head_page(buf));
+			virtnet_release_batch(rq, virt_to_head_page(buf));
 			receive_buf(vi, rq, buf, len, ctx, xdp_xmit, &stats);
 			stats.packets++;
 		}
@@ -3541,7 +3544,7 @@ static void virtnet_rq_free_unused_buf(struct virtqueue *vq, void *buf)
 	int i = vq2rxq(vq);
 
 	if (vi->mergeable_rx_bufs) {
-		virtnet_release_batch(vi, virt_to_head_page(buf));
+		virtnet_release_batch(&vi->rq[i], virt_to_head_page(buf));
 		put_page(virt_to_head_page(buf));
 	} else if (vi->big_packets)
 		give_pages(&vi->rq[i], buf);
