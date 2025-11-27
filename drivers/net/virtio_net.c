@@ -1510,12 +1510,10 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 	batch = rq->cur_batch;
 	if (!batch || batch->is_huge || rq->batch_offset + len + room > batch->size) {
 		dma_addr_t iova_base;
+		struct iova_batch *new_batch;
 		
-		if (batch)
-			virtnet_put_batch(vi, batch);
-
-		batch = kzalloc(sizeof(*batch), gfp);
-		if (!batch) {
+		new_batch = kzalloc(sizeof(*new_batch), gfp);
+		if (!new_batch) {
 			put_page(virt_to_head_page(buf));
 			return -ENOMEM;
 		}
@@ -1525,17 +1523,23 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 						 dma_get_mask(vi->vdev->dev.parent),
 						 vi->vdev->dev.parent);
 		if (!iova_base) {
-			kfree(batch);
+			kfree(new_batch);
 			put_page(virt_to_head_page(buf));
 			return -ENOMEM;
 		}
 
-		batch->is_huge = false;
-		batch->iova_base = iova_base;
-		batch->size = 64 * PAGE_SIZE;
-		atomic_set(&batch->ref, 1); /* Owned by rq */
-		rq->cur_batch = batch;
+		new_batch->is_huge = false;
+		new_batch->iova_base = iova_base;
+		new_batch->size = 64 * PAGE_SIZE;
+		atomic_set(&new_batch->ref, 1); /* Owned by rq */
+		
+		if (rq->cur_batch)
+			virtnet_put_batch(vi, rq->cur_batch);
+		rq->cur_batch = new_batch;
 		rq->batch_offset = 0;
+		
+		/* Update local batch pointer for use below */
+		batch = new_batch;
 	}
 
 have_buf:
