@@ -1558,8 +1558,12 @@ have_buf:
 	ctx = mergeable_len_to_ctx(len, headroom);
 	err = virtqueue_add_inbuf_premapped(rq->vq, iova, len, buf, ctx, gfp);
 	if (err < 0) {
-		atomic_dec(&batch->ref);
 		put_page(virt_to_head_page(buf));
+		if (atomic_read(&batch->ref) == 1) {
+			if (rq->cur_batch == batch)
+				rq->cur_batch = NULL;
+		}
+		virtnet_release_batch(vi, virt_to_head_page(buf));
 	}
 
 	return err;
