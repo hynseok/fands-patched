@@ -309,6 +309,7 @@ struct padded_vnet_hdr {
 };
 
 static void virtnet_rq_free_unused_buf(struct virtqueue *vq, void *buf);
+static void virtnet_put_batch(struct virtnet_info *vi, struct iova_batch *batch);
 static void virtnet_sq_free_unused_buf(struct virtqueue *vq, void *buf);
 static void virtnet_release_batch(struct virtnet_info *vi, struct page *page);
 
