@@ -1479,6 +1479,17 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 
 	/* Step 3: Fallback to F&S Batching (Original Logic) */
 	use_huge_fallback = true;
+
+	/* Check if we need a new batch BEFORE allocating the buffer.
+	 * If we do, we MUST force a new page allocation to prevent sharing a page
+	 * between the old batch and the new batch (which would corrupt page->private).
+	 */
+	batch = rq->cur_batch;
+	if (!batch || batch->is_huge || rq->batch_offset + len + room > batch->size) {
+		if (alloc_frag->offset < alloc_frag->size)
+			alloc_frag->offset = alloc_frag->size;
+	}
+
 	if (unlikely(!skb_page_frag_refill(len + room, alloc_frag, gfp)))
 		return -ENOMEM;
 
@@ -1494,17 +1505,9 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 
 	/* Manage F&S Batch */
 	batch = rq->cur_batch;
-	if (!batch || batch->is_huge || rq->batch_offset >= batch->size) {
+	if (!batch || batch->is_huge || rq->batch_offset + len + room > batch->size) {
 		dma_addr_t iova_base;
 		
-		/* CRITICAL FIX: Ensure we don't share a page across two batches.
-		 * If we are starting a new batch, we MUST use a fresh page.
-		 * Otherwise, page->private (which stores the batch pointer) will be overwritten,
-		 * causing refcount corruption for the previous batch.
-		 */
-		if (alloc_frag->offset < alloc_frag->size)
-			alloc_frag->offset = alloc_frag->size; /* Force new page alloc next time */
-
 		batch = kzalloc(sizeof(*batch), gfp);
 		if (!batch) {
 			put_page(virt_to_head_page(buf));
