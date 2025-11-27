@@ -1673,7 +1673,12 @@ static void virtnet_release_batch(struct virtnet_info *vi, struct page *page)
 	struct iova_batch *batch = (struct iova_batch *)page->private;
 
 	if (batch) {
-		page->private = 0;
+		/* Do NOT clear page->private here.
+		 * Multiple buffers (slices) may share the same page (especially for Hugepages).
+		 * We need to decrement the refcount for EACH buffer.
+		 * If we clear it now, subsequent buffers from the same page will find NULL
+		 * and fail to decrement the refcount, causing a leak.
+		 */
 		if (atomic_dec_and_test(&batch->ref)) {
 			if (batch->is_huge) {
 				dma_unmap_page_attrs(vi->vdev->dev.parent,
@@ -1681,6 +1686,8 @@ static void virtnet_release_batch(struct virtnet_info *vi, struct page *page)
 						     batch->size,
 						     DMA_FROM_DEVICE,
 						     DMA_ATTR_SKIP_CPU_SYNC);
+				/* Now we can clear private as we are freeing the page */
+				batch->huge_page->private = 0;
 				__free_pages(batch->huge_page, 9);
 			} else {
 				dma_unmap_page_attrs_iova(vi->vdev->dev.parent,
