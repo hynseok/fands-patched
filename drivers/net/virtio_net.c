@@ -1558,8 +1558,8 @@ have_buf:
 	ctx = mergeable_len_to_ctx(len, headroom);
 	err = virtqueue_add_inbuf_premapped(rq->vq, iova, len, buf, ctx, gfp);
 	if (err < 0) {
+		atomic_dec(&batch->ref);
 		put_page(virt_to_head_page(buf));
-		virtnet_release_batch(vi, virt_to_head_page(buf));
 	}
 
 	return err;
@@ -1673,12 +1673,6 @@ static void virtnet_release_batch(struct virtnet_info *vi, struct page *page)
 	struct iova_batch *batch = (struct iova_batch *)page->private;
 
 	if (batch) {
-		/* Do NOT clear page->private here.
-		 * Multiple buffers (slices) may share the same page (especially for Hugepages).
-		 * We need to decrement the refcount for EACH buffer.
-		 * If we clear it now, subsequent buffers from the same page will find NULL
-		 * and fail to decrement the refcount, causing a leak.
-		 */
 		if (atomic_dec_and_test(&batch->ref)) {
 			if (batch->is_huge) {
 				dma_unmap_page_attrs(vi->vdev->dev.parent,
@@ -1686,7 +1680,7 @@ static void virtnet_release_batch(struct virtnet_info *vi, struct page *page)
 						     batch->size,
 						     DMA_FROM_DEVICE,
 						     DMA_ATTR_SKIP_CPU_SYNC);
-				/* Now we can clear private as we are freeing the page */
+				
 				batch->huge_page->private = 0;
 				__free_pages(batch->huge_page, 9);
 			} else {
