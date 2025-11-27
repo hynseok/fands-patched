@@ -1460,11 +1460,13 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 				batch->huge_page = huge_page;
 				batch->iova_base = iova_base;
 				batch->size = 2 * 1024 * 1024;
-				atomic_set(&batch->ref, 0);
+				atomic_set(&batch->ref, 1); /* Owned by rq */
 				
 				/* Link page to batch for cleanup */
 				huge_page->private = (unsigned long)batch;
 
+				if (rq->cur_batch)
+					virtnet_put_batch(vi, rq->cur_batch);
 				rq->cur_batch = batch;
 				rq->batch_offset = 0;
 
@@ -1508,6 +1510,9 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 	if (!batch || batch->is_huge || rq->batch_offset + len + room > batch->size) {
 		dma_addr_t iova_base;
 		
+		if (batch)
+			virtnet_put_batch(vi, batch);
+
 		batch = kzalloc(sizeof(*batch), gfp);
 		if (!batch) {
 			put_page(virt_to_head_page(buf));
@@ -1527,7 +1532,7 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 		batch->is_huge = false;
 		batch->iova_base = iova_base;
 		batch->size = 64 * PAGE_SIZE;
-		atomic_set(&batch->ref, 0);
+		atomic_set(&batch->ref, 1); /* Owned by rq */
 		rq->cur_batch = batch;
 		rq->batch_offset = 0;
 	}
@@ -1570,12 +1575,9 @@ have_buf:
 	err = virtqueue_add_inbuf_premapped(rq->vq, iova, len, buf, ctx, gfp);
 	if (err < 0) {
 		put_page(virt_to_head_page(buf));
-		/* If this release will free the batch, clear cur_batch first */
-		if (atomic_read(&batch->ref) == 1) {
-			if (rq->cur_batch == batch)
-				rq->cur_batch = NULL;
-		}
+		/* We added a ref for the buffer, drop it */
 		virtnet_release_batch(vi, virt_to_head_page(buf));
+		/* rq->cur_batch still holds its own ref, so no UAF */
 	}
 
 	return err;
@@ -1684,37 +1686,37 @@ static void refill_work(struct work_struct *work)
 	}
 }
 
+static void virtnet_put_batch(struct virtnet_info *vi, struct iova_batch *batch)
+{
+	if (atomic_dec_and_test(&batch->ref)) {
+		if (batch->is_huge) {
+			dma_unmap_page_attrs(vi->vdev->dev.parent,
+					     batch->iova_base,
+					     batch->size,
+					     DMA_FROM_DEVICE,
+					     DMA_ATTR_SKIP_CPU_SYNC);
+			/* Now we can clear private as we are freeing the page */
+			batch->huge_page->private = 0;
+			__free_pages(batch->huge_page, 9);
+		} else {
+			dma_unmap_page_attrs_iova(vi->vdev->dev.parent,
+						  batch->iova_base,
+						  batch->size,
+						  batch->size,
+						  true,
+						  DMA_FROM_DEVICE,
+						  DMA_ATTR_SKIP_CPU_SYNC);
+		}
+		kfree(batch);
+	}
+}
+
 static void virtnet_release_batch(struct virtnet_info *vi, struct page *page)
 {
 	struct iova_batch *batch = (struct iova_batch *)page->private;
 
-	if (batch) {
-		/* Do NOT clear page->private here.
-		 * Multiple buffers (slices) may share the same page.
-		 * We need to decrement the refcount for EACH buffer.
-		 */
-		if (atomic_dec_and_test(&batch->ref)) {
-			if (batch->is_huge) {
-				dma_unmap_page_attrs(vi->vdev->dev.parent,
-						     batch->iova_base,
-						     batch->size,
-						     DMA_FROM_DEVICE,
-						     DMA_ATTR_SKIP_CPU_SYNC);
-				/* Now we can clear private as we are freeing the page */
-				batch->huge_page->private = 0;
-				__free_pages(batch->huge_page, 9);
-			} else {
-				dma_unmap_page_attrs_iova(vi->vdev->dev.parent,
-							  batch->iova_base,
-							  batch->size,
-							  batch->size,
-							  true,
-							  DMA_FROM_DEVICE,
-							  DMA_ATTR_SKIP_CPU_SYNC);
-			}
-			kfree(batch);
-		}
-	}
+	if (batch)
+		virtnet_put_batch(vi, batch);
 }
 
 static int virtnet_receive(struct receive_queue *rq, int budget,
@@ -3564,6 +3566,12 @@ static void virtnet_rq_free_unused_buf(struct virtqueue *vq, void *buf)
 	if (vi->mergeable_rx_bufs) {
 		virtnet_release_batch(vi, virt_to_head_page(buf));
 		put_page(virt_to_head_page(buf));
+		
+		/* Release rq->cur_batch reference if it exists */
+		if (vi->rq[i].cur_batch) {
+			virtnet_put_batch(vi, vi->rq[i].cur_batch);
+			vi->rq[i].cur_batch = NULL;
+		}
 	} else if (vi->big_packets)
 		give_pages(&vi->rq[i], buf);
 	else
