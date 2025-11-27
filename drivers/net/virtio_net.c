@@ -1497,6 +1497,14 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 	if (!batch || batch->is_huge || rq->batch_offset >= batch->size) {
 		dma_addr_t iova_base;
 		
+		/* CRITICAL FIX: Ensure we don't share a page across two batches.
+		 * If we are starting a new batch, we MUST use a fresh page.
+		 * Otherwise, page->private (which stores the batch pointer) will be overwritten,
+		 * causing refcount corruption for the previous batch.
+		 */
+		if (alloc_frag->offset < alloc_frag->size)
+			alloc_frag->offset = alloc_frag->size; /* Force new page alloc next time */
+
 		batch = kzalloc(sizeof(*batch), gfp);
 		if (!batch) {
 			put_page(virt_to_head_page(buf));
@@ -1559,6 +1567,11 @@ have_buf:
 	err = virtqueue_add_inbuf_premapped(rq->vq, iova, len, buf, ctx, gfp);
 	if (err < 0) {
 		put_page(virt_to_head_page(buf));
+		/* If this release will free the batch, clear cur_batch first */
+		if (atomic_read(&batch->ref) == 1) {
+			if (rq->cur_batch == batch)
+				rq->cur_batch = NULL;
+		}
 		virtnet_release_batch(vi, virt_to_head_page(buf));
 	}
 
@@ -1673,7 +1686,10 @@ static void virtnet_release_batch(struct virtnet_info *vi, struct page *page)
 	struct iova_batch *batch = (struct iova_batch *)page->private;
 
 	if (batch) {
-		page->private = 0;
+		/* Do NOT clear page->private here.
+		 * Multiple buffers (slices) may share the same page.
+		 * We need to decrement the refcount for EACH buffer.
+		 */
 		if (atomic_dec_and_test(&batch->ref)) {
 			if (batch->is_huge) {
 				dma_unmap_page_attrs(vi->vdev->dev.parent,
@@ -1681,6 +1697,8 @@ static void virtnet_release_batch(struct virtnet_info *vi, struct page *page)
 						     batch->size,
 						     DMA_FROM_DEVICE,
 						     DMA_ATTR_SKIP_CPU_SYNC);
+				/* Now we can clear private as we are freeing the page */
+				batch->huge_page->private = 0;
 				__free_pages(batch->huge_page, 9);
 			} else {
 				dma_unmap_page_attrs_iova(vi->vdev->dev.parent,
