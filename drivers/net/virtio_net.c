@@ -149,7 +149,10 @@ struct iova_batch {
 	atomic_t ref;
 	bool is_huge;
 	struct page *huge_page;
+	u32 magic;
 };
+
+#define BATCH_MAGIC 0xDEADBEEF
 
 struct receive_queue {
 	/* Virtqueue associated with this receive_queue */
@@ -939,13 +942,14 @@ static struct sk_buff *receive_big(struct net_device *dev,
 		page_to_skb(vi, rq, page, 0, len, PAGE_SIZE, true, 0, 0);
 
 	stats->bytes += len - vi->hdr_len;
-	if (unlikely(!skb))
+	if (unlikely(!skb)) {
+		stats->drops++;
 		goto err;
+	}
 
 	return skb;
 
 err:
-	stats->drops++;
 	give_pages(rq, page);
 	return NULL;
 }
@@ -1475,6 +1479,7 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 				batch->iova_base = iova_base;
 				batch->size = 2 * 1024 * 1024;
 				atomic_set(&batch->ref, 0);
+				batch->magic = BATCH_MAGIC;
 				
 				/* Link page to batch for cleanup */
 				huge_page->private = (unsigned long)batch;
@@ -1550,6 +1555,7 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 		batch->iova_base = iova_base;
 		batch->size = 64 * PAGE_SIZE;
 		atomic_set(&batch->ref, 0);
+		batch->magic = BATCH_MAGIC;
 		rq->cur_batch = batch;
 		rq->batch_offset = 0;
 	}
@@ -1711,8 +1717,13 @@ static void virtnet_release_batch(struct receive_queue *rq, struct page *page)
 	}
 
 	if (batch) {
+		if (batch->magic != BATCH_MAGIC) {
+			pr_err("virtio_net: Batch %p corrupted! Magic %x\n", batch, batch->magic);
+			return;
+		}
 		if (atomic_dec_and_test(&batch->ref)) {
 			// pr_info("virtio_net: Freeing batch %p (huge=%d)\n", batch, batch->is_huge);
+			batch->magic = 0;
 			if (rq->cur_batch == batch)
 				rq->cur_batch = NULL;
 			if (batch->is_huge) {
