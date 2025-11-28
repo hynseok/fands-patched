@@ -950,6 +950,8 @@ err:
 	return NULL;
 }
 
+static void virtnet_release_batch(struct receive_queue *rq, struct page *page);
+
 static struct sk_buff *receive_mergeable(struct net_device *dev,
 					 struct virtnet_info *vi,
 					 struct receive_queue *rq,
@@ -965,6 +967,10 @@ static struct sk_buff *receive_mergeable(struct net_device *dev,
 	int offset = buf - page_address(page);
 	struct sk_buff *head_skb, *curr_skb;
 	struct bpf_prog *xdp_prog;
+
+	/* Release batch ref for head buffer */
+	virtnet_release_batch(rq, page);
+
 	unsigned int truesize = mergeable_ctx_to_truesize(ctx);
 	unsigned int headroom = mergeable_ctx_to_headroom(ctx);
 	unsigned int metasize = 0;
@@ -1156,6 +1162,9 @@ skip_xdp:
 
 		stats->bytes += len;
 		page = virt_to_head_page(buf);
+
+		/* Release batch ref for fragment buffer */
+		virtnet_release_batch(rq, page);
 
 		truesize = mergeable_ctx_to_truesize(ctx);
 		if (unlikely(len > truesize)) {
