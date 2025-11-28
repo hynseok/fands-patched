@@ -1675,7 +1675,6 @@ static void virtnet_release_batch(struct receive_queue *rq, struct page *page)
 
 	if (batch) {
 		if (atomic_dec_and_test(&batch->ref)) {
-			page->private = 0;
 			if (rq->cur_batch == batch)
 				rq->cur_batch = NULL;
 			if (batch->is_huge) {
