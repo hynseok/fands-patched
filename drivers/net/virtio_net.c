@@ -1594,8 +1594,12 @@ have_buf:
 			rq->last_mapped_iova = map_iova;
 			rq->batch_offset += PAGE_SIZE;
 		}
-		virt_to_head_page(buf)->private = (unsigned long)batch;
-		iova = rq->last_mapped_iova + offset_in_page(buf);
+	if (virt_to_head_page(buf)->private && (void *)virt_to_head_page(buf)->private != batch) {
+		pr_err("virtio_net: OVERWRITE! page %p priv %lx -> %p. Count %d\n", 
+			virt_to_head_page(buf), virt_to_head_page(buf)->private, batch, page_count(virt_to_head_page(buf)));
+	}
+	virt_to_head_page(buf)->private = (unsigned long)batch;
+	iova = rq->last_mapped_iova + offset_in_page(buf);
 	} else {
 		/* Hugepage: IOVA is contiguous */
 		iova = batch->iova_base + (buf - (char *)page_address(batch->huge_page));
@@ -1726,7 +1730,8 @@ static void virtnet_release_batch(struct receive_queue *rq, struct page *page)
 
 	if (batch) {
 		if (batch->magic != BATCH_MAGIC) {
-			pr_err("virtio_net: Batch %p corrupted! Magic %x\n", batch, batch->magic);
+			pr_err("virtio_net: Batch %p corrupted! Magic %x. Page %p, Priv %lx, Count %d\n", 
+				batch, batch->magic, page, page->private, page_count(page));
 			return;
 		}
 		if (atomic_dec_and_test(&batch->ref)) {
