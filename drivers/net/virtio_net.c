@@ -1446,6 +1446,7 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 		/* Ensure private is set (in case it was cleared) */
 		batch->huge_page->private = (unsigned long)batch;
 		atomic_inc(&batch->ref);
+		pr_err("virtio_net: Reuse HUGE batch %p, ref %d\n", batch, atomic_read(&batch->ref));
 		goto have_buf;
 	}
 
@@ -1480,6 +1481,7 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 				huge_page->private = (unsigned long)batch;
 
 				rq->cur_batch = batch;
+				pr_err("virtio_net: New HUGE batch %p, iova %llx, size %zu\n", batch, (u64)batch->iova_base, batch->size);
 				rq->batch_offset = 0;
 
 				/* Use it */
@@ -1551,6 +1553,7 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 		batch->size = 64 * PAGE_SIZE;
 		atomic_set(&batch->ref, 0);
 		rq->cur_batch = batch;
+		pr_err("virtio_net: New F&S batch %p, iova %llx, size %zu\n", batch, (u64)batch->iova_base, batch->size);
 		rq->batch_offset = 0;
 	}
 
@@ -1712,7 +1715,8 @@ static void virtnet_release_batch(struct receive_queue *rq, struct page *page)
 
 	if (batch) {
 		if (atomic_dec_and_test(&batch->ref)) {
-			pr_info("virtio_net: Freeing batch %p (huge=%d)\n", batch, batch->is_huge);
+			pr_err("virtio_net: Freeing batch %p (huge=%d), iova %llx, size %zu\n", 
+				   batch, batch->is_huge, (u64)batch->iova_base, batch->size);
 			if (rq->cur_batch == batch)
 				rq->cur_batch = NULL;
 			if (batch->is_huge) {
