@@ -1511,26 +1511,28 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 		alloc_frag->offset += hole;
 	}
 
+	/* Ensure we don't reuse a page that belongs to a different batch */
+	if (virt_to_head_page(buf)->private &&
+	    ((void *)virt_to_head_page(buf)->private != rq->cur_batch ||
+	     (!rq->cur_batch || rq->cur_batch->is_huge || rq->batch_offset >= rq->cur_batch->size))) {
+		alloc_frag->offset = alloc_frag->size;
+		if (unlikely(!skb_page_frag_refill(len + room, alloc_frag, gfp)))
+			return -ENOMEM;
+		buf = (char *)page_address(alloc_frag->page) + alloc_frag->offset;
+		buf += headroom;
+		get_page(alloc_frag->page);
+		alloc_frag->offset += len + room;
+		hole = alloc_frag->size - alloc_frag->offset;
+		if (hole < len + room) {
+			len += hole;
+			alloc_frag->offset += hole;
+		}
+	}
+
 	/* Manage F&S Batch */
 	batch = rq->cur_batch;
 	if (!batch || batch->is_huge || rq->batch_offset >= batch->size) {
-		/* If we need a new batch, ensure we don't reuse a page that belongs to the old batch */
-		if (virt_to_head_page(buf)->private) {
-			alloc_frag->offset = alloc_frag->size;
-			if (unlikely(!skb_page_frag_refill(len + room, alloc_frag, gfp)))
-				return -ENOMEM;
-			buf = (char *)page_address(alloc_frag->page) + alloc_frag->offset;
-			buf += headroom;
-			get_page(alloc_frag->page);
-			alloc_frag->offset += len + room;
-			hole = alloc_frag->size - alloc_frag->offset;
-			if (hole < len + room) {
-				len += hole;
-				alloc_frag->offset += hole;
-			}
-			/* Refresh batch pointer */
-			batch = rq->cur_batch;
-		}
+
 
 		dma_addr_t iova_base;
 		
