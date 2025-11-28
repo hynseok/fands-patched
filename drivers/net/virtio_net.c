@@ -1680,7 +1680,7 @@ static void virtnet_release_batch(struct virtnet_info *vi, struct page *page)
 						     batch->size,
 						     DMA_FROM_DEVICE,
 						     DMA_ATTR_SKIP_CPU_SYNC);
-				__free_pages(batch->huge_page, 9);
+				put_page(batch->huge_page);
 			} else {
 				dma_unmap_page_attrs_iova(vi->vdev->dev.parent,
 							  batch->iova_base,
