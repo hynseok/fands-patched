@@ -1673,7 +1673,6 @@ static void virtnet_release_batch(struct virtnet_info *vi, struct page *page)
 	struct iova_batch *batch = (struct iova_batch *)page->private;
 
 	if (batch) {
-		page->private = 0;
 		if (atomic_dec_and_test(&batch->ref)) {
 			if (batch->is_huge) {
 				dma_unmap_page_attrs(vi->vdev->dev.parent,
