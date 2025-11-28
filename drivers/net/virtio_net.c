@@ -1498,8 +1498,34 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 
 	/* Step 3: Fallback to F&S Batching (Original Logic) */
 	use_huge_fallback = true;
-	if (unlikely(!skb_page_frag_refill(len + room, alloc_frag, gfp)))
-		return -ENOMEM;
+	
+	while (true) {
+		if (unlikely(!skb_page_frag_refill(len + room, alloc_frag, gfp)))
+			return -ENOMEM;
+
+		struct page *p = alloc_frag->page;
+		
+		/* Check if the page is dirty (has private set) */
+		if (p->private) {
+			/* If we are the only user (refcount 1 from alloc_frag), clear it */
+			if (page_count(p) == 1) {
+				p->private = 0;
+				break;
+			}
+			
+			/* If it belongs to the current batch, it's fine */
+			if ((void *)p->private == rq->cur_batch &&
+			    rq->cur_batch && !rq->cur_batch->is_huge && 
+			    rq->batch_offset < rq->cur_batch->size) {
+				break;
+			}
+			
+			/* Conflict! Force new allocation and retry */
+			alloc_frag->offset = alloc_frag->size;
+			continue;
+		}
+		break;
+	}
 
 	buf = (char *)page_address(alloc_frag->page) + alloc_frag->offset;
 	buf += headroom;
@@ -1509,38 +1535,6 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 	if (hole < len + room) {
 		len += hole;
 		alloc_frag->offset += hole;
-	}
-
-	/* Ensure we don't reuse a page that belongs to a different batch */
-	while (virt_to_head_page(buf)->private) {
-		struct page *p = virt_to_head_page(buf);
-		
-		/* If we are the only user, this is a dirty free page. Claim it. */
-		if (page_count(p) == 1) {
-			p->private = 0;
-			break;
-		}
-
-		/* If it belongs to the current batch, it's fine */
-		if ((void *)p->private == rq->cur_batch &&
-		    rq->cur_batch && !rq->cur_batch->is_huge && 
-		    rq->batch_offset < rq->cur_batch->size) {
-			break;
-		}
-
-		/* Conflict! Force new allocation */
-		alloc_frag->offset = alloc_frag->size;
-		if (unlikely(!skb_page_frag_refill(len + room, alloc_frag, gfp)))
-			return -ENOMEM;
-		buf = (char *)page_address(alloc_frag->page) + alloc_frag->offset;
-		buf += headroom;
-		get_page(alloc_frag->page);
-		alloc_frag->offset += len + room;
-		hole = alloc_frag->size - alloc_frag->offset;
-		if (hole < len + room) {
-			len += hole;
-			alloc_frag->offset += hole;
-		}
 	}
 
 	/* Manage F&S Batch */
