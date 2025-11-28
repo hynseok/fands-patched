@@ -502,9 +502,11 @@ static struct sk_buff *page_to_skb(struct virtnet_info *vi,
 		skb_reserve(skb, p - buf);
 		skb_put(skb, len);
 
-		page = (struct page *)page->private;
-		if (page)
-			give_pages(rq, page);
+		if (!vi->mergeable_rx_bufs) {
+			page = (struct page *)page->private;
+			if (page)
+				give_pages(rq, page);
+		}
 		goto ok;
 	}
 
