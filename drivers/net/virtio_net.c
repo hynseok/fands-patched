@@ -1449,7 +1449,6 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 		rq->batch_offset += len + room;
 		/* Ensure private is set (in case it was cleared) */
 		batch->huge_page->private = (unsigned long)batch;
-		atomic_inc(&batch->ref);
 		goto have_buf;
 	}
 
