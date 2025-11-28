@@ -1434,6 +1434,8 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 		buf = (char *)page_address(batch->huge_page) + rq->batch_offset;
 		get_page(batch->huge_page); /* Ref for the stack */
 		rq->batch_offset += len + room;
+		/* Ensure private is set (in case it was cleared) */
+		batch->huge_page->private = (unsigned long)batch;
 		atomic_inc(&batch->ref);
 		pr_info("virtio_net: Reusing batch %p, ref %d\n", batch, atomic_read(&batch->ref));
 		goto have_buf;
@@ -1677,6 +1679,10 @@ static void virtnet_release_batch(struct receive_queue *rq, struct page *page)
 {
 	struct virtnet_info *vi = rq->vq->vdev->priv;
 	struct iova_batch *batch = (struct iova_batch *)page->private;
+
+	if (!batch && PageHead(page)) {
+		pr_warn("virtio_net: Page %p is Head but private is NULL! Potential leak.\n", page);
+	}
 
 	if (batch) {
 		int ref = atomic_read(&batch->ref);
