@@ -1468,6 +1468,7 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 				huge_page->private = (unsigned long)batch;
 
 				rq->cur_batch = batch;
+				pr_info("virtio_net: Created NEW HUGE batch %p, page %p\n", batch, huge_page);
 				rq->batch_offset = 0;
 
 				/* Use it */
@@ -1677,6 +1678,7 @@ static void virtnet_release_batch(struct receive_queue *rq, struct page *page)
 
 	if (batch) {
 		if (atomic_dec_and_test(&batch->ref)) {
+			pr_info("virtio_net: Freeing batch %p (huge=%d)\n", batch, batch->is_huge);
 			if (rq->cur_batch == batch)
 				rq->cur_batch = NULL;
 			if (batch->is_huge) {
