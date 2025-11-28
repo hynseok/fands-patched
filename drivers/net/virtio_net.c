@@ -1434,6 +1434,8 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 		buf = (char *)page_address(batch->huge_page) + rq->batch_offset;
 		get_page(batch->huge_page); /* Ref for the stack */
 		rq->batch_offset += len + room;
+		atomic_inc(&batch->ref);
+		pr_info("virtio_net: Reusing batch %p, ref %d\n", batch, atomic_read(&batch->ref));
 		goto have_buf;
 	}
 
@@ -1677,6 +1679,8 @@ static void virtnet_release_batch(struct receive_queue *rq, struct page *page)
 	struct iova_batch *batch = (struct iova_batch *)page->private;
 
 	if (batch) {
+		int ref = atomic_read(&batch->ref);
+		pr_info("virtio_net: Release batch %p, page %p, ref before dec: %d\n", batch, page, ref);
 		if (atomic_dec_and_test(&batch->ref)) {
 			pr_info("virtio_net: Freeing batch %p (huge=%d)\n", batch, batch->is_huge);
 			if (rq->cur_batch == batch)
