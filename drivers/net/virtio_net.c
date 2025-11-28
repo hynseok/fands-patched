@@ -1516,7 +1516,6 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 	if (!batch || batch->is_huge || rq->batch_offset >= batch->size) {
 		/* If we need a new batch, ensure we don't reuse a page that belongs to the old batch */
 		if (virt_to_head_page(buf)->private) {
-			put_page(virt_to_head_page(buf));
 			alloc_frag->offset = alloc_frag->size;
 			if (unlikely(!skb_page_frag_refill(len + room, alloc_frag, gfp)))
 				return -ENOMEM;
