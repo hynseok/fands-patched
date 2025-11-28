@@ -310,7 +310,7 @@ struct padded_vnet_hdr {
 
 static void virtnet_rq_free_unused_buf(struct virtqueue *vq, void *buf);
 static void virtnet_sq_free_unused_buf(struct virtqueue *vq, void *buf);
-static void virtnet_release_batch(struct virtnet_info *vi, struct page *page);
+static struct iova_batch *virtnet_release_batch(struct virtnet_info *vi, struct page *page);
 
 static bool is_xdp_frame(void *ptr)
 {
@@ -756,13 +756,15 @@ static struct page *xdp_linearize_page(struct receive_queue *rq,
 			goto err_buf;
 
 		p = virt_to_head_page(buf);
-		virtnet_release_batch(rq->vq->vdev->priv, p);
+		struct iova_batch *batch = virtnet_release_batch(rq->vq->vdev->priv, p);
 		off = buf - page_address(p);
 
 		/* guard against a misconfigured or uncooperative backend that
 		 * is sending packet larger than the MTU.
 		 */
 		if ((page_off + buflen + tailroom) > PAGE_SIZE) {
+			if (batch)
+				p->private = (unsigned long)batch;
 			put_page(p);
 			goto err_buf;
 		}
@@ -770,6 +772,8 @@ static struct page *xdp_linearize_page(struct receive_queue *rq,
 		memcpy(page_address(page) + page_off,
 		       page_address(p) + off, buflen);
 		page_off += buflen;
+		if (batch)
+			p->private = (unsigned long)batch;
 		put_page(p);
 	}
 
@@ -1559,7 +1563,9 @@ have_buf:
 	err = virtqueue_add_inbuf_premapped(rq->vq, iova, len, buf, ctx, gfp);
 	if (err < 0) {
 		put_page(virt_to_head_page(buf));
-		virtnet_release_batch(vi, virt_to_head_page(buf));
+		struct iova_batch *b = virtnet_release_batch(vi, virt_to_head_page(buf));
+		if (b)
+			virt_to_head_page(buf)->private = (unsigned long)b;
 	}
 
 	return err;
@@ -1668,11 +1674,12 @@ static void refill_work(struct work_struct *work)
 	}
 }
 
-static void virtnet_release_batch(struct virtnet_info *vi, struct page *page)
+static struct iova_batch *virtnet_release_batch(struct virtnet_info *vi, struct page *page)
 {
 	struct iova_batch *batch = (struct iova_batch *)page->private;
 
 	if (batch) {
+		page->private = 0;
 		if (atomic_dec_and_test(&batch->ref)) {
 			if (batch->is_huge) {
 				dma_unmap_page_attrs(vi->vdev->dev.parent,
@@ -1691,8 +1698,10 @@ static void virtnet_release_batch(struct virtnet_info *vi, struct page *page)
 							  DMA_ATTR_SKIP_CPU_SYNC);
 			}
 			kfree(batch);
+			return NULL;
 		}
 	}
+	return batch;
 }
 
 static int virtnet_receive(struct receive_queue *rq, int budget,
@@ -1709,8 +1718,14 @@ static int virtnet_receive(struct receive_queue *rq, int budget,
 
 		while (stats.packets < budget &&
 		       (buf = virtqueue_get_buf_ctx(rq->vq, &len, &ctx))) {
-			virtnet_release_batch(vi, virt_to_head_page(buf));
+			struct page *page = virt_to_head_page(buf);
+			struct iova_batch *batch = virtnet_release_batch(vi, page);
+
 			receive_buf(vi, rq, buf, len, ctx, xdp_xmit, &stats);
+
+			if (batch)
+				page->private = (unsigned long)batch;
+
 			stats.packets++;
 		}
 	} else {
