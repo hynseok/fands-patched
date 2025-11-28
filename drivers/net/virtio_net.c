@@ -758,7 +758,7 @@ static struct page *xdp_linearize_page(struct receive_queue *rq,
 			goto err_buf;
 
 		p = virt_to_head_page(buf);
-		virtnet_release_batch(rq->vq->vdev->priv, p);
+		virtnet_release_batch(rq, p);
 		off = buf - page_address(p);
 
 		/* guard against a misconfigured or uncooperative backend that
