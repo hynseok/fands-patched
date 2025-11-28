@@ -1446,7 +1446,6 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 		/* Ensure private is set (in case it was cleared) */
 		batch->huge_page->private = (unsigned long)batch;
 		atomic_inc(&batch->ref);
-		pr_info("virtio_net: Reusing batch %p, ref %d\n", batch, atomic_read(&batch->ref));
 		goto have_buf;
 	}
 
@@ -1481,7 +1480,6 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 				huge_page->private = (unsigned long)batch;
 
 				rq->cur_batch = batch;
-				pr_info("virtio_net: Created NEW HUGE batch %p, page %p\n", batch, huge_page);
 				rq->batch_offset = 0;
 
 				/* Use it */
@@ -1511,6 +1509,25 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 	/* Manage F&S Batch */
 	batch = rq->cur_batch;
 	if (!batch || batch->is_huge || rq->batch_offset >= batch->size) {
+		/* If we need a new batch, ensure we don't reuse a page that belongs to the old batch */
+		if (virt_to_head_page(buf)->private) {
+			put_page(virt_to_head_page(buf));
+			alloc_frag->offset = alloc_frag->size;
+			if (unlikely(!skb_page_frag_refill(len + room, alloc_frag, gfp)))
+				return -ENOMEM;
+			buf = (char *)page_address(alloc_frag->page) + alloc_frag->offset;
+			buf += headroom;
+			get_page(alloc_frag->page);
+			alloc_frag->offset += len + room;
+			hole = alloc_frag->size - alloc_frag->offset;
+			if (hole < len + room) {
+				len += hole;
+				alloc_frag->offset += hole;
+			}
+			/* Refresh batch pointer */
+			batch = rq->cur_batch;
+		}
+
 		dma_addr_t iova_base;
 		
 		batch = kzalloc(sizeof(*batch), gfp);
@@ -1694,8 +1711,6 @@ static void virtnet_release_batch(struct receive_queue *rq, struct page *page)
 	}
 
 	if (batch) {
-		int ref = atomic_read(&batch->ref);
-		pr_info("virtio_net: Release batch %p, page %p, ref before dec: %d\n", batch, page, ref);
 		if (atomic_dec_and_test(&batch->ref)) {
 			pr_info("virtio_net: Freeing batch %p (huge=%d)\n", batch, batch->is_huge);
 			if (rq->cur_batch == batch)
