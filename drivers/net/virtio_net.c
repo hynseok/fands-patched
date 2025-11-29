@@ -1430,18 +1430,21 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 				 struct receive_queue *rq, gfp_t gfp)
 {
 	struct page_frag *alloc_frag = &rq->alloc_frag;
-	unsigned int headroom = virtnet_get_headroom(vi);
-	unsigned int tailroom = headroom ? sizeof(struct skb_shared_info) : 0;
-	unsigned int room = SKB_DATA_ALIGN(headroom + tailroom);
+	struct iova_batch *batch = rq->cur_batch;
 	char *buf;
-	void *ctx;
-	int err;
-	unsigned int len, hole;
-	struct iova_batch *batch;
+	unsigned long ctx;
+	int len, hole, err;
+	void *ctx_p;
+	unsigned int headroom = vi->hdr_len;
+	unsigned int tailroom = sizeof(struct skb_shared_info);
+	unsigned int room = headroom + tailroom;
+	bool use_huge_fallback = false;
+	int node = dev_to_node(vi->vdev->dev.parent);
+
+	pr_err("virtio_net: add_recvbuf_mergeable entry\n");
 	unsigned long flags;
 	struct page *page;
 	dma_addr_t iova;
-	bool use_huge_fallback = false;
 
 	len = get_mergeable_buf_len(rq, &rq->mrg_avg_pkt_len, room);
 
@@ -1573,12 +1576,14 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 		
 		batch = kzalloc(sizeof(*batch), gfp);
 		if (!batch) {
+			pr_err("virtio_net: fallback batch alloc failed\n");
 			put_page(virt_to_head_page(buf));
 			return -ENOMEM;
 		}
 
 		sg = kmalloc_array(512, sizeof(*sg), gfp);
 		if (!sg) {
+			pr_err("virtio_net: fallback sg alloc failed\n");
 			kfree(batch);
 			put_page(virt_to_head_page(buf));
 			return -ENOMEM;
@@ -1586,6 +1591,7 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 		
 		batch->pages = kmalloc_array(512, sizeof(struct page *), gfp);
 		if (!batch->pages) {
+			pr_err("virtio_net: fallback batch->pages alloc failed\n");
 			kfree(sg);
 			kfree(batch);
 			put_page(virt_to_head_page(buf));
@@ -1594,9 +1600,10 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 
 		sg_init_table(sg, 512);
 		for (i = 0; i < 512; i++) {
-			struct page *p = alloc_page(gfp);
+			struct page *p = alloc_pages_node(node, gfp | __GFP_COMP | __GFP_NOWARN | __GFP_NORETRY, 0);
 			if (!p) {
-				for (int j = 0; j < i; j++)
+				pr_err("virtio_net: fallback page alloc failed at index %d\n", i);
+				for (j = 0; j < i; j++)
 					__free_page(batch->pages[j]);
 				kfree(batch->pages);
 				kfree(sg);
@@ -1613,6 +1620,7 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 						 dma_get_mask(vi->vdev->dev.parent),
 						 vi->vdev->dev.parent);
 		if (!iova_base) {
+			pr_err("virtio_net: fallback iova alloc failed\n");
 			for (i = 0; i < 512; i++)
 				__free_page(batch->pages[i]);
 			kfree(batch->pages);
@@ -1750,6 +1758,9 @@ static bool try_fill_recv(struct virtnet_info *vi, struct receive_queue *rq,
 	int err;
 	bool oom;
 
+	pr_err("virtio_net: try_fill_recv entry mergeable=%d big=%d\n", vi->mergeable_rx_bufs, vi->big_packets);
+
+	gfp |= __GFP_COLD;
 	do {
 		if (vi->mergeable_rx_bufs)
 			err = add_recvbuf_mergeable(vi, rq, gfp);
@@ -4026,6 +4037,8 @@ static int virtnet_probe(struct virtio_device *vdev)
 	struct virtnet_info *vi;
 	u16 max_queue_pairs;
 	int mtu;
+
+	pr_err("virtio_net: probe called\n");
 
 	/* Find if host supports multiqueue/rss virtio_net device */
 	max_queue_pairs = 1;
