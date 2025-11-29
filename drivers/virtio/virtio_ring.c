@@ -2263,6 +2263,7 @@ int virtqueue_add_inbuf_premapped(struct virtqueue *vq,
 				  void *ctx,
 				  gfp_t gfp)
 {
+	pr_err("virtio_ring: add_inbuf_premapped addr=%llx len=%d\n", addr, len);
 	/* Only support split ring for now */
 	if (to_vvq(vq)->packed_ring)
 		return -EIO;
@@ -2288,8 +2289,8 @@ EXPORT_SYMBOL_GPL(virtqueue_add_inbuf_premapped);
 int virtqueue_add_inbuf_ctx(struct virtqueue *vq,
 			struct scatterlist *sg, unsigned int num,
 			void *data,
-			void *ctx,
-			gfp_t gfp)
+				void *ctx,
+				gfp_t gfp)
 {
 	return virtqueue_add(vq, &sg, num, 0, 1, data, ctx, gfp);
 }
