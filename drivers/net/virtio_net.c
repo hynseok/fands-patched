@@ -1439,9 +1439,7 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 	int node = dev_to_node(vi->vdev->dev.parent);
 	struct page *page;
 	dma_addr_t iova;
-
-	pr_err("virtio_net: add_recvbuf_mergeable entry\n");
-
+	
 	len = get_mergeable_buf_len(rq, &rq->mrg_avg_pkt_len, room);
 
 	/* Step 1: Check for active Hugepage Batch */
@@ -1460,7 +1458,6 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 	if (!batch || (batch->is_huge && rq->batch_offset >= batch->size)) {
 		struct page *huge_page = alloc_pages(gfp | __GFP_COMP | __GFP_NOWARN | __GFP_NORETRY, 9);
 		if (huge_page) {
-			pr_err("virtio_net: allocated hugepage\n");
 			dma_addr_t iova_base = iommu_dma_alloc_iova(iommu_get_dma_domain(vi->vdev->dev.parent),
 							    2 * 1024 * 1024,
 							    dma_get_mask(vi->vdev->dev.parent),
@@ -1518,8 +1515,6 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 		int i, j;
 		struct scatterlist *sg;
 		
-		pr_err("virtio_net: attempting fallback allocation\n");
-
 		batch = kzalloc(sizeof(*batch), gfp);
 		if (!batch) {
 			pr_err("virtio_net: fallback batch alloc failed\n");
@@ -1628,7 +1623,6 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 
 			get_page(p); /* Hold reference for batch release */
 			atomic_inc(&batch->ref);
-			pr_err("virtio_net: adding to VQ iova=%llx page=%p\n", current_iova, p);
 			err = virtqueue_add_inbuf_premapped(rq->vq, current_iova, PAGE_SIZE, b, ctx, gfp);
 			if (err < 0) {
 				atomic_dec(&batch->ref);
@@ -1799,7 +1793,7 @@ static void virtnet_release_batch(struct virtnet_info *vi, struct page *page)
 
 	if (batch) {
 		if (atomic_dec_and_test(&batch->ref)) {
-			pr_err("virtio_net: releasing batch iova=%llx size=%zu is_huge=%d\n", batch->iova_base, batch->size, batch->is_huge);
+			/* Unmap the batch */
 			page->private = 0; /* Clear private data */
 			if (batch->is_huge) {
 				dma_unmap_page_attrs(vi->vdev->dev.parent,
