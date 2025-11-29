@@ -1176,7 +1176,9 @@ skip_xdp:
 		stats->bytes += len;
 		page = virt_to_head_page(buf);
 		
-		if (ctx && ((unsigned long)ctx > 65536 || ((struct virtnet_buf_ctx *)ctx)->batch)) {
+		page->private = 0;
+		
+		if (ctx && ((unsigned long)ctx > 0xFFFFFFFFUL)) {
 			struct virtnet_buf_ctx *bctx = ctx;
 			truesize = bctx->truesize;
 			virtnet_release_batch(vi, bctx->batch);
