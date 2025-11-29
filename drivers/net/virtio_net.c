@@ -25,6 +25,9 @@
 #include <linux/dma-iommu.h>
 #include <linux/atomic.h>
 
+void iommu_dma_free_iova(struct iommu_dma_cookie *cookie,
+		dma_addr_t iova, size_t size, struct iommu_iotlb_gather *gather);
+
 static int napi_weight = NAPI_POLL_WEIGHT;
 module_param(napi_weight, int, 0444);
 
