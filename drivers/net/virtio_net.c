@@ -23,6 +23,7 @@
 #include <net/xdp.h>
 #include <net/net_failover.h>
 #include <linux/dma-iommu.h>
+#include <linux/iommu.h>
 #include <linux/atomic.h>
 
 void iommu_dma_free_iova(struct iommu_dma_cookie *cookie,
@@ -1622,17 +1623,30 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 		}
 
 		if (iommu_map_sg_atomic(iommu_get_dma_domain(vi->vdev->dev.parent),
-					iova_base, sg, 512, IOMMU_READ | IOMMU_WRITE) < 0) {
+				iova_base, sg, 512, IOMMU_READ | IOMMU_WRITE) < 0) {
+			pr_err("virtio_net: fallback batch map failed\n");
+			kfree(sg);
 			iommu_dma_free_iova(iommu_get_dma_domain(vi->vdev->dev.parent)->iova_cookie,
 					    iova_base, 512 * PAGE_SIZE, NULL);
 			for (i = 0; i < 512; i++)
 				__free_page(batch->pages[i]);
 			kfree(batch->pages);
-			kfree(sg);
 			kfree(batch);
 			put_page(virt_to_head_page(buf));
 			return -ENOMEM;
 		}
+		
+		/* Explicitly sync IOTLB for the mapped batch */
+		{
+			struct iommu_iotlb_gather iotlb_gather;
+			struct iommu_domain *domain = iommu_get_dma_domain(vi->vdev->dev.parent);
+			
+			iommu_iotlb_gather_init(&iotlb_gather);
+			iommu_iotlb_gather_add_range(&iotlb_gather, iova_base, 512 * PAGE_SIZE);
+			iommu_iotlb_sync(domain, &iotlb_gather);
+			pr_err("virtio_net: explicit IOTLB sync for fallback batch iova=%llx size=%lu\n", iova_base, 512 * PAGE_SIZE);
+		}
+
 		kfree(sg);
 
 		batch->is_huge = false;
