@@ -1460,6 +1460,7 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 	if (!batch || (batch->is_huge && rq->batch_offset >= batch->size)) {
 		struct page *huge_page = alloc_pages(gfp | __GFP_COMP | __GFP_NOWARN | __GFP_NORETRY, 9);
 		if (huge_page) {
+			pr_err("virtio_net: allocated hugepage\n");
 			dma_addr_t iova_base = iommu_dma_alloc_iova(iommu_get_dma_domain(vi->vdev->dev.parent),
 							    2 * 1024 * 1024,
 							    dma_get_mask(vi->vdev->dev.parent),
@@ -1517,6 +1518,8 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 		int i, j;
 		struct scatterlist *sg;
 		
+		pr_err("virtio_net: attempting fallback allocation\n");
+
 		batch = kzalloc(sizeof(*batch), gfp);
 		if (!batch) {
 			pr_err("virtio_net: fallback batch alloc failed\n");
