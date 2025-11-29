@@ -1289,8 +1289,6 @@ static void receive_buf(struct virtnet_info *vi, struct receive_queue *rq,
 	}
 
 	if (vi->mergeable_rx_bufs) {
-		if (virt_to_head_page(buf)->private & 1UL)
-			virtnet_release_batch(vi, virt_to_head_page(buf));
 		skb = receive_mergeable(dev, vi, rq, buf, ctx, len, xdp_xmit,
 					stats);
 	} else if (vi->big_packets)
