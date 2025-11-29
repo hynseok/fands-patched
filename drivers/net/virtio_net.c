@@ -976,7 +976,7 @@ static struct sk_buff *receive_mergeable(struct net_device *dev,
 	unsigned int frame_sz;
 	int err;
 
-	if (ctx && ((unsigned long)ctx > 65536 || ((struct virtnet_buf_ctx *)ctx)->batch)) {
+	if (ctx && ((unsigned long)ctx > 0xFFFFFFFFUL || ((struct virtnet_buf_ctx *)ctx)->batch)) {
 		struct virtnet_buf_ctx *bctx = ctx;
 		truesize = bctx->truesize;
 		headroom = 0; /* Not used for hugepages */
@@ -1245,7 +1245,7 @@ err_skb:
 		stats->bytes += len;
 		page = virt_to_head_page(buf);
 		
-		if (ctx && ((unsigned long)ctx > 65536 || ((struct virtnet_buf_ctx *)ctx)->batch)) {
+		if (ctx && ((unsigned long)ctx > 0xFFFFFFFFUL || ((struct virtnet_buf_ctx *)ctx)->batch)) {
 			struct virtnet_buf_ctx *bctx = ctx;
 			virtnet_release_batch(vi, bctx->batch);
 		} else {
@@ -1615,8 +1615,12 @@ have_buf:
 		put_page(virt_to_head_page(buf));
 		virtnet_release_batch(vi, NULL);
 	} else {
+		/* Ensure private is 0 for non-batch pages to avoid cleanup crash */
+		if (!batch)
+			virt_to_head_page(buf)->private = 0;
 		// pr_err("virtio_net: added buf %p iova %llx len %d ref %d\n", buf, iova, len, atomic_read(&batch->ref));
 	}
+
 
 	return err;
 }
