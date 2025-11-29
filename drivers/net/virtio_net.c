@@ -1561,8 +1561,11 @@ have_buf:
 	ctx = mergeable_len_to_ctx(len, headroom);
 	err = virtqueue_add_inbuf_premapped(rq->vq, iova, len, buf, ctx, gfp);
 	if (err < 0) {
+		pr_err("virtio_net: add_inbuf failed err=%d\n", err);
 		put_page(virt_to_head_page(buf));
 		virtnet_release_batch(vi, virt_to_head_page(buf));
+	} else {
+		// pr_err("virtio_net: added buf %p iova %llx len %d ref %d\n", buf, iova, len, atomic_read(&batch->ref));
 	}
 
 	return err;
@@ -1686,7 +1689,7 @@ static void virtnet_release_batch(struct virtnet_info *vi, struct page *page)
 						     batch->size,
 						     DMA_FROM_DEVICE,
 						     DMA_ATTR_SKIP_CPU_SYNC);
-				__free_pages(batch->huge_page, 9);
+				put_page(batch->huge_page);
 			} else {
 				dma_unmap_page_attrs_iova(vi->vdev->dev.parent,
 							  batch->iova_base,
