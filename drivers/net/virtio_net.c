@@ -1504,7 +1504,7 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 		}
 
 		iova_base = iommu_dma_alloc_iova(iommu_get_dma_domain(vi->vdev->dev.parent),
-						 64 * PAGE_SIZE,
+						 512 * PAGE_SIZE,
 						 dma_get_mask(vi->vdev->dev.parent),
 						 vi->vdev->dev.parent);
 		if (!iova_base) {
@@ -1515,7 +1515,7 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 
 		batch->is_huge = false;
 		batch->iova_base = iova_base;
-		batch->size = 64 * PAGE_SIZE;
+		batch->size = 512 * PAGE_SIZE;
 		atomic_set(&batch->ref, 0);
 		rq->cur_batch = batch;
 		rq->batch_offset = 0;
