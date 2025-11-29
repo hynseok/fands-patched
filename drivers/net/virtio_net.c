@@ -1978,15 +1978,7 @@ static int xmit_skb(struct send_queue *sq, struct sk_buff *skb)
 		hdr->num_buffers = 0;
 
 	sg_init_table(sq->sg, skb_shinfo(skb)->nr_frags + (can_push ? 1 : 2));
-	/* Sync DMA for CPU access */
-	if (page->private) {
-		struct iova_batch *batch = (struct iova_batch *)page->private;
-		if (batch->is_huge) {
-			unsigned long offset = (char *)buf - (char *)page_address(batch->huge_page);
-			dma_addr_t iova = batch->iova_base + offset;
-			dma_sync_single_for_cpu(vi->vdev->dev.parent, iova, len, DMA_FROM_DEVICE);
-		}
-	}
+
 
 	if (can_build_skb(vi, len)) {
 		__skb_push(skb, hdr_len);
