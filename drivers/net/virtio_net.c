@@ -1432,19 +1432,17 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 	struct page_frag *alloc_frag = &rq->alloc_frag;
 	struct iova_batch *batch = rq->cur_batch;
 	char *buf;
-	unsigned long ctx;
+	void *ctx;
 	int len, hole, err;
-	void *ctx_p;
 	unsigned int headroom = vi->hdr_len;
 	unsigned int tailroom = sizeof(struct skb_shared_info);
 	unsigned int room = headroom + tailroom;
 	bool use_huge_fallback = false;
 	int node = dev_to_node(vi->vdev->dev.parent);
-
-	pr_err("virtio_net: add_recvbuf_mergeable entry\n");
-	unsigned long flags;
 	struct page *page;
 	dma_addr_t iova;
+
+	pr_err("virtio_net: add_recvbuf_mergeable entry\n");
 
 	len = get_mergeable_buf_len(rq, &rq->mrg_avg_pkt_len, room);
 
@@ -1571,7 +1569,7 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 	/* Fallback to F&S Batching with iommu_map_sg_atomic */
 	{
 		dma_addr_t iova_base;
-		int i;
+		int i, j;
 		struct scatterlist *sg;
 		
 		batch = kzalloc(sizeof(*batch), gfp);
@@ -1760,7 +1758,7 @@ static bool try_fill_recv(struct virtnet_info *vi, struct receive_queue *rq,
 
 	pr_err("virtio_net: try_fill_recv entry mergeable=%d big=%d\n", vi->mergeable_rx_bufs, vi->big_packets);
 
-	gfp |= __GFP_COLD;
+	//gfp |= __GFP_COLD;
 	do {
 		if (vi->mergeable_rx_bufs)
 			err = add_recvbuf_mergeable(vi, rq, gfp);

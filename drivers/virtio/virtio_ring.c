@@ -2263,7 +2263,6 @@ int virtqueue_add_inbuf_premapped(struct virtqueue *vq,
 				  void *ctx,
 				  gfp_t gfp)
 {
-	pr_err("virtio_ring: add_inbuf_premapped addr=%llx len=%d\n", addr, len);
 	/* Only support split ring for now */
 	if (to_vvq(vq)->packed_ring)
 		return -EIO;
