@@ -319,6 +319,44 @@ static void virtnet_rq_free_unused_buf(struct virtqueue *vq, void *buf);
 static void virtnet_sq_free_unused_buf(struct virtqueue *vq, void *buf);
 static void virtnet_release_batch(struct virtnet_info *vi, struct iova_batch *batch);
 
+static bool is_xdp_frame(void *ptr)
+{
+	return (unsigned long)ptr & VIRTIO_XDP_FLAG;
+}
+
+static void *xdp_to_ptr(struct xdp_frame *ptr)
+{
+	return (void *)((unsigned long)ptr | VIRTIO_XDP_FLAG);
+}
+
+static struct xdp_frame *ptr_to_xdp(void *ptr)
+{
+	return (struct xdp_frame *)((unsigned long)ptr & ~VIRTIO_XDP_FLAG);
+}
+
+/* Converting between virtqueue no. and kernel tx/rx queue no.
+ * 0:rx0 1:tx0 2:rx1 3:tx1 ... 2N:rxN 2N+1:txN 2N+2:cvq
+ */
+static int vq2txq(struct virtqueue *vq)
+{
+	return (vq->index - 1) / 2;
+}
+
+static int txq2vq(int txq)
+{
+	return txq * 2 + 1;
+}
+
+static int vq2rxq(struct virtqueue *vq)
+{
+	return vq->index / 2;
+}
+
+static int rxq2vq(int rxq)
+{
+	return rxq * 2;
+}
+
 static inline struct virtio_net_hdr_mrg_rxbuf *skb_vnet_hdr(struct sk_buff *skb)
 {
 	return (struct virtio_net_hdr_mrg_rxbuf *)skb->cb;
