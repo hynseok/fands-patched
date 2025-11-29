@@ -1159,6 +1159,9 @@ skip_xdp:
 		stats->bytes += len;
 		page = virt_to_head_page(buf);
 
+		if (vi->mergeable_rx_bufs && (page->private & 1UL))
+			virtnet_release_batch(vi, page);
+
 		truesize = mergeable_ctx_to_truesize(ctx);
 		if (unlikely(len > truesize)) {
 			pr_debug("%s: rx error: len %u exceeds truesize %lu\n",
@@ -1215,6 +1218,8 @@ err_skb:
 		}
 		stats->bytes += len;
 		page = virt_to_head_page(buf);
+		if (vi->mergeable_rx_bufs && (page->private & 1UL))
+			virtnet_release_batch(vi, page);
 		put_page(page);
 	}
 err_buf:
