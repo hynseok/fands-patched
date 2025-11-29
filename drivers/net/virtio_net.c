@@ -143,12 +143,19 @@ struct send_queue {
 };
 
 /* Internal representation of a receive virtqueue */
+struct virtnet_buf_ctx {
+	struct iova_batch *batch;
+	unsigned int truesize;
+};
+
 struct iova_batch {
+	struct page *huge_page;
 	dma_addr_t iova_base;
 	size_t size;
 	atomic_t ref;
 	bool is_huge;
-	struct page *huge_page;
+	u16 next_ctx_index;
+	struct virtnet_buf_ctx ctxs[2048];
 };
 
 struct receive_queue {
@@ -308,9 +315,46 @@ struct padded_vnet_hdr {
 	char padding[12];
 };
 
-static void virtnet_rq_free_unused_buf(struct virtqueue *vq, void *buf);
-static void virtnet_sq_free_unused_buf(struct virtqueue *vq, void *buf);
-static void virtnet_release_batch(struct virtnet_info *vi, struct page *page);
+static void virtnet_rq_free_unused_buf(struct virtqueue *vq, void *buf)
+{
+	struct virtnet_info *vi = vq->vdev->priv;
+	struct receive_queue *rq = &vi->rq[vq2rxq(vq)];
+	struct page *page = virt_to_head_page(buf);
+	void *ctx = virtqueue_get_buf_ctx(vq, NULL, NULL);
+
+	if (ctx && ((unsigned long)ctx > 65536 || ((struct virtnet_buf_ctx *)ctx)->batch)) {
+		struct virtnet_buf_ctx *bctx = ctx;
+		virtnet_release_batch(vi, bctx->batch);
+	}
+	put_page(page);
+}
+
+static void virtnet_sq_free_unused_buf(struct virtqueue *vq, void *buf)
+{
+	if (likely(is_xdp_frame(buf))) {
+		struct xdp_frame *frame = ptr_to_xdp(buf);
+
+		xdp_return_frame(frame);
+	} else {
+		kfree_skb(buf);
+	}
+}
+
+static void virtnet_release_batch(struct virtnet_info *vi, struct iova_batch *batch)
+{
+	if (!batch)
+		return;
+
+	if (atomic_dec_and_test(&batch->ref)) {
+		if (batch->is_huge) {
+			dma_unmap_page_attrs(vi->vdev->dev.parent, batch->iova_base, batch->size, DMA_FROM_DEVICE, DMA_ATTR_SKIP_CPU_SYNC);
+			__free_pages(batch->huge_page, 9);
+		} else {
+			iommu_dma_free_iova(iommu_get_dma_domain(vi->vdev->dev.parent), batch->iova_base, batch->size);
+		}
+		kfree(batch);
+	}
+}
 
 static bool is_xdp_frame(void *ptr)
 {
@@ -756,7 +800,7 @@ static struct page *xdp_linearize_page(struct receive_queue *rq,
 			goto err_buf;
 
 		p = virt_to_head_page(buf);
-		virtnet_release_batch(rq->vq->vdev->priv, p);
+		virtnet_release_batch(rq->vq->vdev->priv, NULL);
 		off = buf - page_address(p);
 
 		/* guard against a misconfigured or uncooperative backend that
@@ -963,11 +1007,20 @@ static struct sk_buff *receive_mergeable(struct net_device *dev,
 	int offset = buf - page_address(page);
 	struct sk_buff *head_skb, *curr_skb;
 	struct bpf_prog *xdp_prog;
-	unsigned int truesize = mergeable_ctx_to_truesize(ctx);
-	unsigned int headroom = mergeable_ctx_to_headroom(ctx);
+	unsigned int truesize;
+	unsigned int headroom;
 	unsigned int metasize = 0;
 	unsigned int frame_sz;
 	int err;
+
+	if (ctx && ((unsigned long)ctx > 65536 || ((struct virtnet_buf_ctx *)ctx)->batch)) {
+		struct virtnet_buf_ctx *bctx = ctx;
+		truesize = bctx->truesize;
+		headroom = 0; /* Not used for hugepages */
+	} else {
+		truesize = mergeable_ctx_to_truesize(ctx);
+		headroom = mergeable_ctx_to_headroom(ctx);
+	}
 
 	head_skb = NULL;
 	stats->bytes += len - vi->hdr_len;
@@ -1153,20 +1206,25 @@ skip_xdp:
 		}
 
 		stats->bytes += len;
+		stats->bytes += len;
 		page = virt_to_head_page(buf);
-		virtnet_release_batch(vi, page);
 		
-		/* Sync DMA for CPU access */
-		if (page->private) {
-			struct iova_batch *batch = (struct iova_batch *)page->private;
-			if (batch->is_huge) {
-				unsigned long offset = (char *)buf - (char *)page_address(batch->huge_page);
-				dma_addr_t iova = batch->iova_base + offset;
-				dma_sync_single_for_cpu(vi->vdev->dev.parent, iova, len, DMA_FROM_DEVICE);
+		if (ctx && ((unsigned long)ctx > 65536 || ((struct virtnet_buf_ctx *)ctx)->batch)) {
+			struct virtnet_buf_ctx *bctx = ctx;
+			truesize = bctx->truesize;
+			virtnet_release_batch(vi, bctx->batch);
+			
+			/* Sync DMA for CPU access */
+			if (bctx->batch && bctx->batch->is_huge) {
+				unsigned long offset = (char *)buf - (char *)page_address(bctx->batch->huge_page);
+				dma_addr_t iova = bctx->batch->iova_base + offset;
+				dma_sync_single_for_cpu(vi->vdev->dev.parent, iova, len, DMA_FROM_DEVICE, DMA_ATTR_SKIP_CPU_SYNC);
 			}
+		} else {
+			truesize = mergeable_ctx_to_truesize(ctx);
+			virtnet_release_batch(vi, NULL);
 		}
 
-		truesize = mergeable_ctx_to_truesize(ctx);
 		if (unlikely(len > truesize)) {
 			pr_debug("%s: rx error: len %u exceeds truesize %lu\n",
 				 dev->name, len, (unsigned long)ctx);
@@ -1213,7 +1271,7 @@ err_xdp:
 err_skb:
 	put_page(page);
 	while (num_buf-- > 1) {
-		buf = virtqueue_get_buf(rq->vq, &len);
+		buf = virtqueue_get_buf_ctx(rq->vq, &len, &ctx);
 		if (unlikely(!buf)) {
 			pr_debug("%s: rx error: %d buffers missing\n",
 				 dev->name, num_buf);
@@ -1221,8 +1279,16 @@ err_skb:
 			break;
 		}
 		stats->bytes += len;
+		stats->bytes += len;
 		page = virt_to_head_page(buf);
-		virtnet_release_batch(vi, page);
+		
+		if (ctx && ((unsigned long)ctx > 65536 || ((struct virtnet_buf_ctx *)ctx)->batch)) {
+			struct virtnet_buf_ctx *bctx = ctx;
+			virtnet_release_batch(vi, bctx->batch);
+		} else {
+			virtnet_release_batch(vi, NULL);
+		}
+		
 		put_page(page);
 	}
 err_buf:
@@ -1274,6 +1340,7 @@ static void receive_buf(struct virtnet_info *vi, struct receive_queue *rq,
 		pr_debug("%s: short packet %i\n", dev->name, len);
 		dev->stats.rx_length_errors++;
 		if (vi->mergeable_rx_bufs) {
+			virtnet_release_batch(vi, NULL);
 			put_page(virt_to_head_page(buf));
 		} else if (vi->big_packets) {
 			give_pages(rq, buf);
@@ -1473,9 +1540,9 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 				batch->iova_base = iova_base;
 				batch->size = 2 * 1024 * 1024;
 				atomic_set(&batch->ref, 0);
-				
-				/* Link page to batch for cleanup */
-				huge_page->private = (unsigned long)batch;
+				batch->next_ctx_index = 0;
+
+				// huge_page->private = (unsigned long)batch;
 
 				rq->cur_batch = batch;
 				rq->batch_offset = 0;
@@ -1568,7 +1635,16 @@ have_buf:
 	}
 
 	atomic_inc(&batch->ref);
-	ctx = mergeable_len_to_ctx(len, headroom);
+	
+	if (batch->is_huge && batch->next_ctx_index < 2048) {
+		struct virtnet_buf_ctx *bctx = &batch->ctxs[batch->next_ctx_index++];
+		bctx->batch = batch;
+		bctx->truesize = len;
+		ctx = bctx;
+	} else {
+		ctx = mergeable_len_to_ctx(len, headroom);
+	}
+
 	err = virtqueue_add_inbuf_premapped(rq->vq, iova, len, buf, ctx, gfp);
 	if (err < 0) {
 		pr_err("virtio_net: add_inbuf failed err=%d\n", err);
@@ -1684,15 +1760,12 @@ static void refill_work(struct work_struct *work)
 	}
 }
 
-static void virtnet_release_batch(struct virtnet_info *vi, struct page *page)
+static void virtnet_release_batch(struct virtnet_info *vi, struct iova_batch *batch)
 {
-	struct iova_batch *batch = (struct iova_batch *)page->private;
-
 	if (batch) {
 		int new_ref = atomic_dec_return(&batch->ref);
-		pr_err("virtio_net: release_batch page=%p batch=%p ref=%d\n", page, batch, new_ref);
+		// pr_err("virtio_net: release_batch batch=%p ref=%d\n", batch, new_ref);
 		if (new_ref == 0) {
-			page->private = 0;
 			if (batch->is_huge) {
 				dma_unmap_page_attrs(vi->vdev->dev.parent,
 						     batch->iova_base,
@@ -1711,7 +1784,7 @@ static void virtnet_release_batch(struct virtnet_info *vi, struct page *page)
 			}
 			kfree(batch);
 		} else if (new_ref < 0) {
-			pr_err("virtio_net: batch ref underflow! page=%p batch=%p ref=%d\n", page, batch, new_ref);
+			pr_err("virtio_net: batch ref underflow! batch=%p ref=%d\n", batch, new_ref);
 		}
 	}
 }
