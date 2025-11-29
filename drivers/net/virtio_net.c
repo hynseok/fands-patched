@@ -1465,18 +1465,12 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 			if (!iova_base) {
 				__free_pages(huge_page, 9);
 			} else {
-				/* Manual map with explicit sync */
+				/* Manual map with sync_size=2MB to ensure IOTLB flush */
 				struct iommu_domain *domain = iommu_get_dma_domain(vi->vdev->dev.parent);
-				if (iommu_map_atomic(domain, iova_base, 0, page_to_phys(huge_page), 2 * 1024 * 1024, IOMMU_READ | IOMMU_WRITE)) {
+				if (iommu_map_atomic(domain, iova_base, 2 * 1024 * 1024, page_to_phys(huge_page), 2 * 1024 * 1024, IOMMU_READ | IOMMU_WRITE)) {
 					iommu_dma_free_iova(domain->iova_cookie, iova_base, 2 * 1024 * 1024, NULL);
 					__free_pages(huge_page, 9);
 				} else {
-					/* Explicitly sync IOTLB */
-					struct iommu_iotlb_gather iotlb_gather;
-					iommu_iotlb_gather_init(&iotlb_gather);
-					iommu_iotlb_gather_add_range(&iotlb_gather, iova_base, 2 * 1024 * 1024);
-					iommu_iotlb_sync(domain, &iotlb_gather);
-					
 					/* Success! Create new batch */
 					batch = kzalloc(sizeof(*batch), gfp);
 					if (!batch) {
