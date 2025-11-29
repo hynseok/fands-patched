@@ -1455,90 +1455,38 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 	}
 
 	/* Step 2: Try to allocate new Hugepage */
-	/* Only try if we don't have a batch or the current one is full */
-	if (!batch || rq->batch_offset + len + room > batch->size) {
-		struct page *huge_page = alloc_pages(gfp | __GFP_COMP | __GFP_NOWARN | __GFP_NORETRY, 9);
-		if (huge_page) {
-			dma_addr_t iova_base = dma_map_page_attrs(vi->vdev->dev.parent,
-								  huge_page,
-								  0,
-								  2 * 1024 * 1024,
-								  DMA_FROM_DEVICE,
-								  DMA_ATTR_SKIP_CPU_SYNC);
-			if (dma_mapping_error(vi->vdev->dev.parent, iova_base)) {
-				__free_pages(huge_page, 9);
-			} else {
-				/* Success! Create new batch */
-				batch = kzalloc(sizeof(*batch), gfp);
-				if (!batch) {
-					dma_unmap_page_attrs(vi->vdev->dev.parent, iova_base, 2 * 1024 * 1024, DMA_FROM_DEVICE, DMA_ATTR_SKIP_CPU_SYNC);
-					__free_pages(huge_page, 9);
-					return -ENOMEM;
-				}
-				batch->is_huge = true;
-				batch->huge_page = huge_page;
-				batch->iova_base = iova_base;
-				batch->size = 2 * 1024 * 1024;
-				atomic_set(&batch->ref, 0);
-				
-				/* Link page to batch for cleanup */
-				huge_page->private = (unsigned long)batch | 1UL;
-
-				rq->cur_batch = batch;
-				rq->batch_offset = 0;
-
-				/* Use it */
-				buf = (char *)page_address(huge_page);
-				get_page(huge_page);
-				rq->batch_offset += len + room;
-				goto have_buf;
-			}
-		}
-	}
-
-	/* Step 3: Fallback to F&S Batching (Original Logic) */
-	use_huge_fallback = true;
-	if (unlikely(!skb_page_frag_refill(len + room, alloc_frag, gfp)))
-		return -ENOMEM;
-
-	buf = (char *)page_address(alloc_frag->page) + alloc_frag->offset;
-	buf += headroom;
-	get_page(alloc_frag->page);
-	alloc_frag->offset += len + room;
-	hole = alloc_frag->size - alloc_frag->offset;
-	if (hole < len + room) {
-		len += hole;
-		alloc_frag->offset += hole;
-	}
-
-	/* Manage F&S Batch */
-	batch = rq->cur_batch;
-	if (batch && batch->is_huge && rq->batch_offset < batch->size)
-		goto have_buf;
 
 	/* Try to allocate new Hugepage */
 	if (!batch || (batch->is_huge && rq->batch_offset >= batch->size)) {
 		struct page *huge_page = alloc_pages(gfp | __GFP_COMP | __GFP_NOWARN | __GFP_NORETRY, 9);
 		if (huge_page) {
-			dma_addr_t iova_base = dma_map_page_attrs(vi->vdev->dev.parent,
-								  huge_page,
-								  0,
-								  2 * 1024 * 1024,
-								  DMA_FROM_DEVICE,
-								  DMA_ATTR_SKIP_CPU_SYNC);
-			if (dma_mapping_error(vi->vdev->dev.parent, iova_base)) {
+			dma_addr_t iova_base = iommu_dma_alloc_iova(iommu_get_dma_domain(vi->vdev->dev.parent),
+							    2 * 1024 * 1024,
+							    dma_get_mask(vi->vdev->dev.parent),
+							    vi->vdev->dev.parent);
+			if (!iova_base) {
 				__free_pages(huge_page, 9);
 			} else {
-				/* Success! Create new batch */
-				batch = kzalloc(sizeof(*batch), gfp);
-				if (!batch) {
-					struct iommu_domain *domain = iommu_get_dma_domain(vi->vdev->dev.parent);
-					iommu_unmap(domain, iova_base, 2 * 1024 * 1024);
+				/* Manual map with explicit sync */
+				struct iommu_domain *domain = iommu_get_dma_domain(vi->vdev->dev.parent);
+				if (iommu_map_atomic(domain, iova_base, 0, page_to_phys(huge_page), 2 * 1024 * 1024, IOMMU_READ | IOMMU_WRITE)) {
 					iommu_dma_free_iova(domain->iova_cookie, iova_base, 2 * 1024 * 1024, NULL);
 					__free_pages(huge_page, 9);
-					put_page(virt_to_head_page(buf));
-					return -ENOMEM;
-				}
+				} else {
+					/* Explicitly sync IOTLB */
+					struct iommu_iotlb_gather iotlb_gather;
+					iommu_iotlb_gather_init(&iotlb_gather);
+					iommu_iotlb_gather_add_range(&iotlb_gather, iova_base, 2 * 1024 * 1024);
+					iommu_iotlb_sync(domain, &iotlb_gather);
+					
+					/* Success! Create new batch */
+					batch = kzalloc(sizeof(*batch), gfp);
+					if (!batch) {
+						iommu_unmap(domain, iova_base, 2 * 1024 * 1024);
+						iommu_dma_free_iova(domain->iova_cookie, iova_base, 2 * 1024 * 1024, NULL);
+						__free_pages(huge_page, 9);
+						return -ENOMEM;
+					}
 				batch->is_huge = true;
 				batch->huge_page = huge_page;
 				batch->iova_base = iova_base;
@@ -1554,13 +1502,9 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 				rq->batch_offset = 0;
 
 				/* Use it */
-				/* We have a new huge batch. We can use it immediately in have_buf.
-				   But we also have the 'buf' from skb_page_frag_refill that we don't need anymore.
-				*/
-				put_page(virt_to_head_page(buf));
-				
-				/* Re-calculate buf/iova for the new hugepage */
-				/* Actually, have_buf logic handles this using rq->batch_offset */
+				buf = (char *)page_address(huge_page);
+				get_page(huge_page);
+				rq->batch_offset += len + room;
 				goto have_buf;
 			}
 		}
@@ -1575,7 +1519,6 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 		batch = kzalloc(sizeof(*batch), gfp);
 		if (!batch) {
 			pr_err("virtio_net: fallback batch alloc failed\n");
-			put_page(virt_to_head_page(buf));
 			return -ENOMEM;
 		}
 
@@ -1583,7 +1526,6 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 		if (!sg) {
 			pr_err("virtio_net: fallback sg alloc failed\n");
 			kfree(batch);
-			put_page(virt_to_head_page(buf));
 			return -ENOMEM;
 		}
 		
@@ -1592,7 +1534,6 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 			pr_err("virtio_net: fallback batch->pages alloc failed\n");
 			kfree(sg);
 			kfree(batch);
-			put_page(virt_to_head_page(buf));
 			return -ENOMEM;
 		}
 
@@ -1606,7 +1547,6 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 				kfree(batch->pages);
 				kfree(sg);
 				kfree(batch);
-				put_page(virt_to_head_page(buf));
 				return -ENOMEM;
 			}
 			sg_set_page(&sg[i], p, PAGE_SIZE, 0);
@@ -1624,7 +1564,6 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 			kfree(batch->pages);
 			kfree(sg);
 			kfree(batch);
-			put_page(virt_to_head_page(buf));
 			return -ENOMEM;
 		}
 
@@ -1645,7 +1584,6 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 						__free_page(batch->pages[i]);
 					kfree(batch->pages);
 					kfree(batch);
-					put_page(virt_to_head_page(buf));
 					return -ENOMEM;
 				}
 			}
@@ -1698,20 +1636,18 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 		
 		if (atomic_read(&batch->ref) == 0) {
 			/* Failed to add ANY buffers */
-			dma_unmap_page_attrs_iova(vi->vdev->dev.parent, batch->iova_base, batch->size,
-						  batch->size, true, DMA_FROM_DEVICE,
-						  DMA_ATTR_SKIP_CPU_SYNC);
+			struct iommu_domain *domain = iommu_get_dma_domain(vi->vdev->dev.parent);
+			iommu_unmap(domain, batch->iova_base, batch->size);
+			iommu_dma_free_iova(domain->iova_cookie, batch->iova_base, batch->size, NULL);
 			for (i = 0; i < batch->num_pages; i++)
 				put_page(batch->pages[i]);
 			kfree(batch->pages);
 			kfree(batch);
 			rq->cur_batch = NULL;
-			put_page(virt_to_head_page(buf));
 			return -ENOMEM;
 		}
 
 		/* We added some buffers. Return success. */
-		put_page(virt_to_head_page(buf)); /* Free the original buf */
 		return 0;
 	}
 
