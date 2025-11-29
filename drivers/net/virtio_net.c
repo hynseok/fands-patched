@@ -1436,8 +1436,8 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 	}
 
 	/* Step 2: Try to allocate new Hugepage */
-	/* Only try if we don't have a batch or the current one is full/not huge */
-	if (!batch || (batch->is_huge && rq->batch_offset + len + room > batch->size)) {
+	/* Only try if we don't have a batch or the current one is full */
+	if (!batch || rq->batch_offset + len + room > batch->size) {
 		struct page *huge_page = alloc_pages(gfp | __GFP_COMP | __GFP_NOWARN | __GFP_NORETRY, 9);
 		if (huge_page) {
 			dma_addr_t iova_base = dma_map_page_attrs(vi->vdev->dev.parent,
@@ -1559,7 +1559,12 @@ have_buf:
 	err = virtqueue_add_inbuf_premapped(rq->vq, iova, len, buf, ctx, gfp);
 	if (err < 0) {
 		put_page(virt_to_head_page(buf));
-		virtnet_release_batch(vi, virt_to_head_page(buf));
+		if (atomic_read(&batch->ref) == 1) {
+			virtnet_release_batch(vi, virt_to_head_page(buf));
+			rq->cur_batch = NULL;
+		} else {
+			virtnet_release_batch(vi, virt_to_head_page(buf));
+		}
 	}
 
 	return err;
