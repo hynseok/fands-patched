@@ -1565,7 +1565,7 @@ have_buf:
 		put_page(virt_to_head_page(buf));
 		virtnet_release_batch(vi, virt_to_head_page(buf));
 	} else {
-		// pr_err("virtio_net: added buf %p iova %llx len %d ref %d\n", buf, iova, len, atomic_read(&batch->ref));
+		pr_err("virtio_net: added buf %p iova %llx len %d ref %d\n", buf, iova, len, atomic_read(&batch->ref));
 	}
 
 	return err;
