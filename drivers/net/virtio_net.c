@@ -495,6 +495,9 @@ static struct sk_buff *page_to_skb(struct virtnet_info *vi,
 
 	/* copy small packet so we can reuse these pages */
 	if (!NET_IP_ALIGN && len > GOOD_COPY_LEN && tailroom >= shinfo_size) {
+		if (page->private & 1UL)
+			goto skip_reuse;
+
 		skb = build_skb(buf, truesize);
 		if (unlikely(!skb))
 			return NULL;
@@ -503,12 +506,13 @@ static struct sk_buff *page_to_skb(struct virtnet_info *vi,
 		skb_put(skb, len);
 
 		page = (struct page *)page->private;
-		if (page)
+		if (page && !((unsigned long)page & 1UL))
 			give_pages(rq, page);
 		goto ok;
 	}
 
 	/* copy small packet so we can reuse these pages for small data */
+skip_reuse:
 	skb = napi_alloc_skb(&rq->napi, GOOD_COPY_LEN);
 	if (unlikely(!skb))
 		return NULL;
@@ -1268,13 +1272,17 @@ static void receive_buf(struct virtnet_info *vi, struct receive_queue *rq,
 		} else {
 			put_page(virt_to_head_page(buf));
 		}
+		if (vi->mergeable_rx_bufs && (virt_to_head_page(buf)->private & 1UL))
+			virtnet_release_batch(vi, virt_to_head_page(buf));
 		return;
 	}
 
-	if (vi->mergeable_rx_bufs)
+	if (vi->mergeable_rx_bufs) {
+		if (virt_to_head_page(buf)->private & 1UL)
+			virtnet_release_batch(vi, virt_to_head_page(buf));
 		skb = receive_mergeable(dev, vi, rq, buf, ctx, len, xdp_xmit,
 					stats);
-	else if (vi->big_packets)
+	} else if (vi->big_packets)
 		skb = receive_big(dev, vi, rq, buf, len, stats);
 	else
 		skb = receive_small(dev, vi, rq, buf, ctx, len, xdp_xmit, stats);
@@ -1463,7 +1471,7 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 				atomic_set(&batch->ref, 0);
 				
 				/* Link page to batch for cleanup */
-				huge_page->private = (unsigned long)batch;
+				huge_page->private = (unsigned long)batch | 1UL;
 
 				rq->cur_batch = batch;
 				rq->batch_offset = 0;
@@ -1547,7 +1555,7 @@ have_buf:
 			rq->last_mapped_iova = map_iova;
 			rq->batch_offset += PAGE_SIZE;
 		}
-		virt_to_head_page(buf)->private = (unsigned long)batch;
+		virt_to_head_page(buf)->private = (unsigned long)batch | 1UL;
 		iova = rq->last_mapped_iova + offset_in_page(buf);
 	} else {
 		/* Hugepage: IOVA is contiguous */
@@ -1675,7 +1683,7 @@ static void refill_work(struct work_struct *work)
 
 static void virtnet_release_batch(struct virtnet_info *vi, struct page *page)
 {
-	struct iova_batch *batch = (struct iova_batch *)page->private;
+	struct iova_batch *batch = (struct iova_batch *)(page->private & ~1UL);
 
 	if (batch) {
 		if (atomic_dec_and_test(&batch->ref)) {
