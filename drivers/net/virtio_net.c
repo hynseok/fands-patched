@@ -1474,6 +1474,7 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 				buf = (char *)page_address(huge_page);
 				get_page(huge_page);
 				rq->batch_offset += len + room;
+				pr_err("virtio_net: new huge batch %p page %p\n", batch, huge_page);
 				goto have_buf;
 			}
 		}
@@ -1675,7 +1676,9 @@ static void virtnet_release_batch(struct virtnet_info *vi, struct page *page)
 	struct iova_batch *batch = (struct iova_batch *)page->private;
 
 	if (batch) {
-		if (atomic_dec_and_test(&batch->ref)) {
+		int new_ref = atomic_dec_return(&batch->ref);
+		pr_err("virtio_net: release_batch page=%p batch=%p ref=%d\n", page, batch, new_ref);
+		if (new_ref == 0) {
 			page->private = 0;
 			if (batch->is_huge) {
 				dma_unmap_page_attrs(vi->vdev->dev.parent,
@@ -1694,6 +1697,8 @@ static void virtnet_release_batch(struct virtnet_info *vi, struct page *page)
 							  DMA_ATTR_SKIP_CPU_SYNC);
 			}
 			kfree(batch);
+		} else if (new_ref < 0) {
+			pr_err("virtio_net: batch ref underflow! page=%p batch=%p ref=%d\n", page, batch, new_ref);
 		}
 	}
 }
