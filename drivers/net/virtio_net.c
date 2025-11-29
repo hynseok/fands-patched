@@ -1509,6 +1509,7 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 		if (!batch->huge_page) {
 			kfree(batch);
 			batch = NULL;
+			rq->cur_batch = NULL;
 		} else {
 			batch->size = 2 * 1024 * 1024;
 			batch->iova_base = dma_map_page_attrs(vi->vdev->dev.parent,
@@ -1521,6 +1522,7 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 				put_page(batch->huge_page);
 				kfree(batch);
 				batch = NULL;
+				rq->cur_batch = NULL;
 			} else {
 				batch->is_huge = true;
 				atomic_set(&batch->ref, 1); /* Owned by rq */
