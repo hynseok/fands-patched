@@ -2336,7 +2336,7 @@ int iommu_map(struct iommu_domain *domain, unsigned long iova,
 	      phys_addr_t paddr, size_t size, int prot)
 {
 	might_sleep();
-	return _iommu_map(domain, iova, size, paddr, size, prot, GFP_KERNEL);
+	return _iommu_map(domain, iova, 0, paddr, size, prot, GFP_KERNEL);
 }
 EXPORT_SYMBOL_GPL(iommu_map);
 
