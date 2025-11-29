@@ -1434,8 +1434,9 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 	int err;
 	unsigned int len, hole;
 	struct iova_batch *batch;
+	unsigned long flags;
+	struct page *page;
 	dma_addr_t iova;
-	unsigned long pfn;
 	bool use_huge_fallback = false;
 
 	len = get_mergeable_buf_len(rq, &rq->mrg_avg_pkt_len, room);
@@ -1818,6 +1819,8 @@ static void refill_work(struct work_struct *work)
 static void virtnet_release_batch(struct virtnet_info *vi, struct page *page)
 {
 	struct iova_batch *batch = (struct iova_batch *)(page->private & ~1UL);
+
+
 
 	if (batch) {
 		if (atomic_dec_and_test(&batch->ref)) {
