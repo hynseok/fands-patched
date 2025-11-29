@@ -188,6 +188,7 @@ struct receive_queue {
 	struct xdp_rxq_info xdp_rxq;
 
 	struct iova_batch *cur_batch;
+	struct iova_batch *spare_batch;
 	u32 batch_offset;
 	unsigned long last_mapped_pfn;
 	dma_addr_t last_mapped_iova;
@@ -316,7 +317,7 @@ struct padded_vnet_hdr {
 
 static void virtnet_rq_free_unused_buf(struct virtqueue *vq, void *buf);
 static void virtnet_sq_free_unused_buf(struct virtqueue *vq, void *buf);
-static void virtnet_release_batch(struct virtnet_info *vi, struct page *page);
+static void virtnet_release_batch(struct virtnet_info *vi, struct receive_queue *rq, struct page *page);
 
 static bool is_xdp_frame(void *ptr)
 {
@@ -766,7 +767,7 @@ static struct page *xdp_linearize_page(struct receive_queue *rq,
 			goto err_buf;
 
 		p = virt_to_head_page(buf);
-		virtnet_release_batch(rq->vq->vdev->priv, p);
+		virtnet_release_batch(rq->vq->vdev->priv, rq, p);
 		off = buf - page_address(p);
 
 		/* guard against a misconfigured or uncooperative backend that
@@ -1225,7 +1226,7 @@ err_skb:
 		stats->bytes += len;
 		page = virt_to_head_page(buf);
 		if (vi->mergeable_rx_bufs && (page->private & 1UL))
-			virtnet_release_batch(vi, page);
+			virtnet_release_batch(vi, rq, page);
 		put_page(page);
 	}
 err_buf:
@@ -1284,7 +1285,7 @@ static void receive_buf(struct virtnet_info *vi, struct receive_queue *rq,
 			put_page(virt_to_head_page(buf));
 		}
 		if (vi->mergeable_rx_bufs && (virt_to_head_page(buf)->private & 1UL))
-			virtnet_release_batch(vi, virt_to_head_page(buf));
+			virtnet_release_batch(vi, rq, virt_to_head_page(buf));
 		return;
 	}
 
@@ -1453,6 +1454,21 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 	}
 
 	/* Step 2: Try to allocate new Hugepage */
+	
+	/* Try to recycle spare batch */
+	if (!batch && rq->spare_batch) {
+		batch = rq->spare_batch;
+		rq->spare_batch = NULL;
+		rq->cur_batch = batch;
+		rq->batch_offset = 0;
+		/* Ref is already 0 from release */
+		
+		/* Use it */
+		buf = (char *)page_address(batch->huge_page);
+		get_page(batch->huge_page);
+		rq->batch_offset += len + room;
+		goto have_buf;
+	}
 
 	/* Try to allocate new Hugepage */
 	if (!batch || (batch->is_huge && rq->batch_offset >= batch->size)) {
@@ -1663,10 +1679,10 @@ have_buf:
 	if (err < 0) {
 		put_page(virt_to_head_page(buf));
 		if (atomic_read(&batch->ref) == 1) {
-			virtnet_release_batch(vi, virt_to_head_page(buf));
+			virtnet_release_batch(vi, rq, virt_to_head_page(buf));
 			rq->cur_batch = NULL;
 		} else {
-			virtnet_release_batch(vi, virt_to_head_page(buf));
+			virtnet_release_batch(vi, rq, virt_to_head_page(buf));
 		}
 	}
 
@@ -1779,34 +1795,48 @@ static void refill_work(struct work_struct *work)
 	}
 }
 
-static void virtnet_release_batch(struct virtnet_info *vi, struct page *page)
+static void virtnet_release_batch(struct virtnet_info *vi, struct receive_queue *rq, struct page *page)
 {
-	struct iova_batch *batch = (struct iova_batch *)(page->private & ~1UL);
+	struct iova_batch *batch;
+	struct virtio_net_hdr_mrg_rxbuf *hdr;
+	struct page *p;
+	int i;
 
+	if (page->private & 1UL) {
+		batch = (struct iova_batch *)(page->private & ~1UL);
+		if (batch) {
+			if (atomic_dec_and_test(&batch->ref)) {
+				/* Try to recycle huge batch */
+				if (batch->is_huge && page_count(batch->huge_page) == 1) {
+					if (rq && !rq->spare_batch) {
+						/* Recycle! */
+						atomic_set(&batch->ref, 0);
+						rq->spare_batch = batch;
+						return;
+					}
+				}
 
-
-	if (batch) {
-		if (atomic_dec_and_test(&batch->ref)) {
-			/* Unmap the batch */
-			page->private = 0; /* Clear private data */
-			if (batch->is_huge) {
-				dma_unmap_page_attrs(vi->vdev->dev.parent,
-						     batch->iova_base,
-						     batch->size,
-						     DMA_FROM_DEVICE,
-						     DMA_ATTR_SKIP_CPU_SYNC);
-				__free_pages(batch->huge_page, 9);
-			} else {
-				int i;
-				dma_unmap_page_attrs_iova(vi->vdev->dev.parent, batch->iova_base, batch->size,
-							  batch->size, true, DMA_FROM_DEVICE,
-							  DMA_ATTR_SKIP_CPU_SYNC);
-				for (i = 0; i < batch->num_pages; i++)
-					put_page(batch->pages[i]);
-				kfree(batch->pages);
+				/* Unmap the batch */
+				page->private = 0; /* Clear private data */
+				if (batch->is_huge) {
+					struct iommu_domain *domain = iommu_get_dma_domain(vi->vdev->dev.parent);
+					iommu_unmap(domain, batch->iova_base, batch->size);
+					iommu_dma_free_iova(domain->iova_cookie, batch->iova_base, batch->size, NULL);
+					__free_pages(batch->huge_page, 9);
+				} else {
+					struct iommu_domain *domain = iommu_get_dma_domain(vi->vdev->dev.parent);
+					iommu_unmap(domain, batch->iova_base, batch->size);
+					iommu_dma_free_iova(domain->iova_cookie, batch->iova_base, batch->size, NULL);
+					for (i = 0; i < batch->num_pages; i++)
+						__free_page(batch->pages[i]);
+					kfree(batch->pages);
+				}
+				kfree(batch);
 			}
-			kfree(batch);
 		}
+	} else {
+		/* Standard path for small pages */
+		put_page(page);
 	}
 }
 
@@ -1824,7 +1854,6 @@ static int virtnet_receive(struct receive_queue *rq, int budget,
 
 		while (stats.packets < budget &&
 		       (buf = virtqueue_get_buf_ctx(rq->vq, &len, &ctx))) {
-			virtnet_release_batch(vi, virt_to_head_page(buf));
 			receive_buf(vi, rq, buf, len, ctx, xdp_xmit, &stats);
 			stats.packets++;
 		}
@@ -3598,6 +3627,27 @@ static void virtnet_free_queues(struct virtnet_info *vi)
 	for (i = 0; i < vi->max_queue_pairs; i++) {
 		__netif_napi_del(&vi->rq[i].napi);
 		__netif_napi_del(&vi->sq[i].napi);
+
+		if (vi->rq[i].spare_batch) {
+			struct iova_batch *batch = vi->rq[i].spare_batch;
+			if (batch->is_huge) {
+				struct iommu_domain *domain = iommu_get_dma_domain(vi->vdev->dev.parent);
+				iommu_unmap(domain, batch->iova_base, batch->size);
+				iommu_dma_free_iova(domain->iova_cookie, batch->iova_base, batch->size, NULL);
+				__free_pages(batch->huge_page, 9);
+			} else {
+				/* Should not happen for spare batch (only huge) but safe to handle */
+				struct iommu_domain *domain = iommu_get_dma_domain(vi->vdev->dev.parent);
+				int j;
+				iommu_unmap(domain, batch->iova_base, batch->size);
+				iommu_dma_free_iova(domain->iova_cookie, batch->iova_base, batch->size, NULL);
+				for (j = 0; j < batch->num_pages; j++)
+					__free_page(batch->pages[j]);
+				kfree(batch->pages);
+			}
+			kfree(batch);
+			vi->rq[i].spare_batch = NULL;
+		}
 	}
 
 	/* We called __netif_napi_del(),
@@ -3655,7 +3705,7 @@ static void virtnet_rq_free_unused_buf(struct virtqueue *vq, void *buf)
 	int i = vq2rxq(vq);
 
 	if (vi->mergeable_rx_bufs) {
-		virtnet_release_batch(vi, virt_to_head_page(buf));
+		virtnet_release_batch(vi, &vi->rq[i], virt_to_head_page(buf));
 		put_page(virt_to_head_page(buf));
 	} else if (vi->big_packets)
 		give_pages(&vi->rq[i], buf);
