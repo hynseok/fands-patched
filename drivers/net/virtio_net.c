@@ -967,6 +967,10 @@ static struct sk_buff *receive_mergeable(struct net_device *dev,
 	struct virtio_net_hdr_mrg_rxbuf *hdr = buf;
 	u16 num_buf = virtio16_to_cpu(vi->vdev, hdr->num_buffers);
 	struct page *page = virt_to_head_page(buf);
+	
+	/* Clear private to prevent page_to_skb from treating it as a chain */
+	page->private = 0;
+
 	int offset = buf - page_address(page);
 	struct sk_buff *head_skb, *curr_skb;
 	struct bpf_prog *xdp_prog;
@@ -1244,6 +1248,7 @@ err_skb:
 		stats->bytes += len;
 		stats->bytes += len;
 		page = virt_to_head_page(buf);
+		page->private = 0;
 		
 		if (ctx && ((unsigned long)ctx > 0xFFFFFFFFUL || ((struct virtnet_buf_ctx *)ctx)->batch)) {
 			struct virtnet_buf_ctx *bctx = ctx;
@@ -1598,7 +1603,8 @@ have_buf:
 		iova = batch->iova_base + (buf - (char *)page_address(batch->huge_page));
 	}
 
-	atomic_inc(&batch->ref);
+	if (batch)
+		atomic_inc(&batch->ref);
 	
 	if (batch->is_huge && batch->next_ctx_index < 2048) {
 		struct virtnet_buf_ctx *bctx = &batch->ctxs[batch->next_ctx_index++];
@@ -1613,7 +1619,7 @@ have_buf:
 	if (err < 0) {
 		pr_err("virtio_net: add_inbuf failed err=%d\n", err);
 		put_page(virt_to_head_page(buf));
-		virtnet_release_batch(vi, NULL);
+		virtnet_release_batch(vi, batch);
 	} else {
 		/* Ensure private is 0 for non-batch pages to avoid cleanup crash */
 		if (!batch)
