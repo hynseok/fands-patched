@@ -1508,6 +1508,7 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 				goto have_buf;
 			}
 		}
+		}
 	}
 
 	/* Fallback to F&S Batching with iommu_map_sg_atomic */
