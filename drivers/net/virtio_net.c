@@ -1167,7 +1167,7 @@ skip_xdp:
 		page = virt_to_head_page(buf);
 
 		if (vi->mergeable_rx_bufs && (page->private & 1UL))
-			virtnet_release_batch(vi, page);
+			virtnet_release_batch(vi, rq, page);
 
 		truesize = mergeable_ctx_to_truesize(ctx);
 		if (unlikely(len > truesize)) {
