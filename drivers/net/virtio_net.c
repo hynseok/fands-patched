@@ -814,7 +814,7 @@ static struct sk_buff *receive_small(struct net_device *dev,
 	unsigned int metasize = 0;
 
 	len -= vi->hdr_len;
-	stats->bytes += len;2
+	stats->bytes += len;
 
 	if (unlikely(len > GOOD_PACKET_LEN)) {
 		pr_debug("%s: rx error: len %u exceeds max size %d\n",
