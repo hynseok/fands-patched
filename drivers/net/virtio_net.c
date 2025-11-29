@@ -1980,7 +1980,7 @@ static int xmit_skb(struct send_queue *sq, struct sk_buff *skb)
 	sg_init_table(sq->sg, skb_shinfo(skb)->nr_frags + (can_push ? 1 : 2));
 
 
-	if (can_build_skb(vi, len)) {
+	if (can_push) {
 		__skb_push(skb, hdr_len);
 		num_sg = skb_to_sgvec(skb, sq->sg, 0, skb->len);
 		if (unlikely(num_sg < 0))
