@@ -1819,11 +1819,9 @@ static void virtnet_release_batch(struct virtnet_info *vi, struct receive_queue 
 				/* Unmap the batch */
 				page->private = 0; /* Clear private data */
 				if (batch->is_huge) {
-					dma_unmap_page_attrs(vi->vdev->dev.parent,
-							     batch->iova_base,
-							     batch->size,
-							     DMA_FROM_DEVICE,
-							     DMA_ATTR_SKIP_CPU_SYNC);
+					struct iommu_domain *domain = iommu_get_dma_domain(vi->vdev->dev.parent);
+					iommu_unmap(domain, batch->iova_base, batch->size);
+					iommu_dma_free_iova(domain->iova_cookie, batch->iova_base, batch->size, NULL);
 					__free_pages(batch->huge_page, 9);
 				} else {
 					struct iommu_domain *domain = iommu_get_dma_domain(vi->vdev->dev.parent);
@@ -3634,11 +3632,9 @@ static void virtnet_free_queues(struct virtnet_info *vi)
 		if (vi->rq[i].spare_batch) {
 			struct iova_batch *batch = vi->rq[i].spare_batch;
 			if (batch->is_huge) {
-				dma_unmap_page_attrs(vi->vdev->dev.parent,
-						     batch->iova_base,
-						     batch->size,
-						     DMA_FROM_DEVICE,
-						     DMA_ATTR_SKIP_CPU_SYNC);
+				struct iommu_domain *domain = iommu_get_dma_domain(vi->vdev->dev.parent);
+				iommu_unmap(domain, batch->iova_base, batch->size);
+				iommu_dma_free_iova(domain->iova_cookie, batch->iova_base, batch->size, NULL);
 				__free_pages(batch->huge_page, 9);
 			} else {
 				/* Should not happen for spare batch (only huge) but safe to handle */
