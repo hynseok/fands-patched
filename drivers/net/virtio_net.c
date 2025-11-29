@@ -980,7 +980,7 @@ static struct sk_buff *receive_mergeable(struct net_device *dev,
 	unsigned int frame_sz;
 	int err;
 
-	if (ctx && ((unsigned long)ctx > 0xFFFFFFFFUL || ((struct virtnet_buf_ctx *)ctx)->batch)) {
+	if (ctx && ((unsigned long)ctx > 0xFFFFFFFFUL)) {
 		struct virtnet_buf_ctx *bctx = ctx;
 		truesize = bctx->truesize;
 		headroom = 0; /* Not used for hugepages */
@@ -1250,7 +1250,7 @@ err_skb:
 		page = virt_to_head_page(buf);
 		page->private = 0;
 		
-		if (ctx && ((unsigned long)ctx > 0xFFFFFFFFUL || ((struct virtnet_buf_ctx *)ctx)->batch)) {
+		if (ctx && ((unsigned long)ctx > 0xFFFFFFFFUL)) {
 			struct virtnet_buf_ctx *bctx = ctx;
 			virtnet_release_batch(vi, bctx->batch);
 		} else {
@@ -1606,7 +1606,7 @@ have_buf:
 	if (batch)
 		atomic_inc(&batch->ref);
 	
-	if (batch->is_huge && batch->next_ctx_index < 2048) {
+	if (batch && batch->is_huge && batch->next_ctx_index < 2048) {
 		struct virtnet_buf_ctx *bctx = &batch->ctxs[batch->next_ctx_index++];
 		bctx->batch = batch;
 		bctx->truesize = len;
