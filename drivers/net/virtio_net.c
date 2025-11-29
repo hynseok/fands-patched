@@ -968,8 +968,7 @@ static struct sk_buff *receive_mergeable(struct net_device *dev,
 	u16 num_buf = virtio16_to_cpu(vi->vdev, hdr->num_buffers);
 	struct page *page = virt_to_head_page(buf);
 	
-	/* Clear private to prevent page_to_skb from treating it as a chain */
-	page->private = 0;
+
 
 	int offset = buf - page_address(page);
 	struct sk_buff *head_skb, *curr_skb;
@@ -979,6 +978,9 @@ static struct sk_buff *receive_mergeable(struct net_device *dev,
 	unsigned int metasize = 0;
 	unsigned int frame_sz;
 	int err;
+	
+	/* Clear private to prevent page_to_skb from treating it as a chain */
+	page->private = 0;
 
 	if (ctx && ((unsigned long)ctx > 0xFFFFFFFFUL)) {
 		struct virtnet_buf_ctx *bctx = ctx;
@@ -1525,16 +1527,16 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 				batch->next_ctx_index = 0;
 
 				/* Link page to batch for cleanup */
-				huge_page->private = (unsigned long)batch;
+				batch->huge_page->private = (unsigned long)batch;
 
 				rq->cur_batch = batch;
 				rq->batch_offset = 0;
 
 				/* Use it */
-				buf = (char *)page_address(huge_page);
-				get_page(huge_page);
+				buf = (char *)page_address(batch->huge_page);
+				get_page(batch->huge_page);
 				rq->batch_offset += len + room;
-				pr_err("virtio_net: new huge batch %p page %p\n", batch, huge_page);
+				pr_err("virtio_net: new huge batch %p page %p\n", batch, batch->huge_page);
 				goto have_buf;
 			}
 		}
