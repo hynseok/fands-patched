@@ -984,9 +984,18 @@ static struct sk_buff *receive_mergeable(struct net_device *dev,
 		struct virtnet_buf_ctx *bctx = ctx;
 		truesize = bctx->truesize;
 		headroom = 0; /* Not used for hugepages */
+		virtnet_release_batch(vi, bctx->batch);
+		
+		/* Sync DMA for CPU access */
+		if (bctx->batch && bctx->batch->is_huge) {
+			unsigned long offset = (char *)buf - (char *)page_address(bctx->batch->huge_page);
+			dma_addr_t iova = bctx->batch->iova_base + offset;
+			dma_sync_single_for_cpu(vi->vdev->dev.parent, iova, len, DMA_FROM_DEVICE);
+		}
 	} else {
 		truesize = mergeable_ctx_to_truesize(ctx);
 		headroom = mergeable_ctx_to_headroom(ctx);
+		virtnet_release_batch(vi, NULL);
 	}
 
 	head_skb = NULL;
@@ -1486,30 +1495,33 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 
 	/* Step 2: Try to allocate new Hugepage */
 	/* Only try if we don't have a batch or the current one is full/not huge */
-	if (!batch || (batch->is_huge && rq->batch_offset + len + room > batch->size)) {
-		struct page *huge_page = alloc_pages(gfp | __GFP_COMP | __GFP_NOWARN | __GFP_NORETRY, 9);
-		if (huge_page) {
-			dma_addr_t iova_base = dma_map_page_attrs(vi->vdev->dev.parent,
-								  huge_page,
-								  0,
-								  2 * 1024 * 1024,
-								  DMA_FROM_DEVICE,
-								  DMA_ATTR_SKIP_CPU_SYNC);
-			if (dma_mapping_error(vi->vdev->dev.parent, iova_base)) {
-				__free_pages(huge_page, 9);
+	if (!batch || batch->next_ctx_index >= 2048) {
+		if (batch)
+			virtnet_release_batch(vi, batch);
+
+		batch = kzalloc(sizeof(*batch), gfp);
+		if (!batch)
+			return -ENOMEM;
+		
+		batch->huge_page = alloc_pages(gfp | __GFP_COMP | __GFP_NOWARN, 9);
+		if (!batch->huge_page) {
+			kfree(batch);
+			batch = NULL;
+		} else {
+			batch->size = 2 * 1024 * 1024;
+			batch->iova_base = dma_map_page_attrs(vi->vdev->dev.parent,
+							      batch->huge_page,
+							      0,
+							      batch->size,
+							      DMA_FROM_DEVICE,
+							      DMA_ATTR_SKIP_CPU_SYNC);
+			if (dma_mapping_error(vi->vdev->dev.parent, batch->iova_base)) {
+				put_page(batch->huge_page);
+				kfree(batch);
+				batch = NULL;
 			} else {
-				/* Success! Create new batch */
-				batch = kzalloc(sizeof(*batch), gfp);
-				if (!batch) {
-					dma_unmap_page_attrs(vi->vdev->dev.parent, iova_base, 2 * 1024 * 1024, DMA_FROM_DEVICE, DMA_ATTR_SKIP_CPU_SYNC);
-					__free_pages(huge_page, 9);
-					return -ENOMEM;
-				}
 				batch->is_huge = true;
-				batch->huge_page = huge_page;
-				batch->iova_base = iova_base;
-				batch->size = 2 * 1024 * 1024;
-				atomic_set(&batch->ref, 0);
+				atomic_set(&batch->ref, 1); /* Owned by rq */
 				batch->next_ctx_index = 0;
 
 				/* Link page to batch for cleanup */
