@@ -744,7 +744,7 @@ static dma_addr_t __iommu_dma_map(struct device *dev, phys_addr_t phys, dma_addr
 	if (!iova)
 		return DMA_MAPPING_ERROR;
 
-	if (iommu_map_atomic(domain, iova, first_iova, phys - iova_off, size, prot)) {
+	if (iommu_map_atomic(domain, iova, iova_addr ? (first_iova ? size * 64 : 0) : size, phys - iova_off, size, prot)) {
 		iommu_dma_free_iova(cookie, iova, size, NULL);
 		return DMA_MAPPING_ERROR;
 	}
