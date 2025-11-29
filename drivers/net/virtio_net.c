@@ -1622,18 +1622,25 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 			return -ENOMEM;
 		}
 
-		if (iommu_map_sg_atomic(iommu_get_dma_domain(vi->vdev->dev.parent),
-				iova_base, sg, 512, IOMMU_READ | IOMMU_WRITE) < 0) {
-			pr_err("virtio_net: fallback batch map failed\n");
-			kfree(sg);
-			iommu_dma_free_iova(iommu_get_dma_domain(vi->vdev->dev.parent)->iova_cookie,
-					    iova_base, 512 * PAGE_SIZE, NULL);
-			for (i = 0; i < 512; i++)
-				__free_page(batch->pages[i]);
-			kfree(batch->pages);
-			kfree(batch);
-			put_page(virt_to_head_page(buf));
-			return -ENOMEM;
+		/* Manual map loop with batched sync */
+		{
+			struct iommu_domain *domain = iommu_get_dma_domain(vi->vdev->dev.parent);
+			for (i = 0; i < 512; i++) {
+				dma_addr_t iova = iova_base + i * PAGE_SIZE;
+				phys_addr_t phys = page_to_phys(batch->pages[i]);
+				if (iommu_map_atomic(domain, iova, 0, phys, PAGE_SIZE, IOMMU_READ | IOMMU_WRITE)) {
+					pr_err("virtio_net: fallback batch map failed at index %d\n", i);
+					/* Unmap what we mapped so far */
+					iommu_dma_free_iova(domain->iova_cookie, iova_base, i * PAGE_SIZE, NULL);
+					/* Free remaining pages */
+					for (i = 0; i < 512; i++)
+						__free_page(batch->pages[i]);
+					kfree(batch->pages);
+					kfree(batch);
+					put_page(virt_to_head_page(buf));
+					return -ENOMEM;
+				}
+			}
 		}
 		
 		/* Explicitly sync IOTLB for the mapped batch */
