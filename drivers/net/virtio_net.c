@@ -1583,7 +1583,7 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 		batch->is_huge = false;
 		batch->iova_base = iova_base;
 		batch->size = 64 * PAGE_SIZE;
-		atomic_set(&batch->ref, 0);
+		atomic_set(&batch->ref, 1); /* Owned by rq */
 		rq->cur_batch = batch;
 		rq->batch_offset = 0;
 	}
@@ -1773,6 +1773,9 @@ static void virtnet_release_batch(struct virtnet_info *vi, struct iova_batch *ba
 							  true,
 							  DMA_FROM_DEVICE,
 							  DMA_ATTR_SKIP_CPU_SYNC);
+				iommu_dma_free_iova(iommu_get_dma_domain(vi->vdev->dev.parent),
+						    batch->iova_base,
+						    batch->size);
 			}
 			kfree(batch);
 		} else if (new_ref < 0) {
