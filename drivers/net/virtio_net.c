@@ -1773,9 +1773,6 @@ static void virtnet_release_batch(struct virtnet_info *vi, struct iova_batch *ba
 							  true,
 							  DMA_FROM_DEVICE,
 							  DMA_ATTR_SKIP_CPU_SYNC);
-				iommu_dma_free_iova(iommu_get_dma_domain(vi->vdev->dev.parent),
-						    batch->iova_base,
-						    batch->size);
 			}
 			kfree(batch);
 		} else if (new_ref < 0) {
