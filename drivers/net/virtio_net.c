@@ -1154,6 +1154,7 @@ skip_xdp:
 
 		stats->bytes += len;
 		page = virt_to_head_page(buf);
+		virtnet_release_batch(vi, page);
 
 		truesize = mergeable_ctx_to_truesize(ctx);
 		if (unlikely(len > truesize)) {
@@ -1211,6 +1212,7 @@ err_skb:
 		}
 		stats->bytes += len;
 		page = virt_to_head_page(buf);
+		virtnet_release_batch(vi, page);
 		put_page(page);
 	}
 err_buf:
