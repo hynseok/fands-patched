@@ -745,12 +745,12 @@ static dma_addr_t __iommu_dma_map(struct device *dev, phys_addr_t phys, dma_addr
 	if (!iova)
 		return DMA_MAPPING_ERROR;
 
-	if (iommu_map_atomic(domain, iova, iova_addr ? (first_iova ? size * 512 : 0) : 0, phys - iova_off, size, prot)) {
-		pr_err("dma-iommu: map failed iova=%llx phys=%llx size=%zu sync_size=%zu\n", iova, phys, size, iova_addr ? (first_iova ? size * 512 : 0) : 0);
+	if (iommu_map_atomic(domain, iova, iova_addr ? (first_iova ? size * 512 : 0) : size, phys - iova_off, size, prot)) {
+		pr_err("dma-iommu: map failed iova=%llx phys=%llx size=%zu sync_size=%zu\n", iova, phys, size, iova_addr ? (first_iova ? size * 512 : 0) : size);
 		iommu_dma_free_iova(cookie, iova, size, NULL);
 		return DMA_MAPPING_ERROR;
 	}
-	pr_err("dma-iommu: map success iova=%llx phys=%llx size=%zu sync_size=%zu\n", iova, phys, size, iova_addr ? (first_iova ? size * 512 : 0) : 0);
+	pr_err("dma-iommu: map success iova=%llx phys=%llx size=%zu sync_size=%zu\n", iova, phys, size, iova_addr ? (first_iova ? size * 512 : 0) : size);
 	return iova + iova_off;
 }
 
