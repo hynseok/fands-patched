@@ -1155,6 +1155,16 @@ skip_xdp:
 		stats->bytes += len;
 		page = virt_to_head_page(buf);
 		virtnet_release_batch(vi, page);
+		
+		/* Sync DMA for CPU access */
+		if (page->private) {
+			struct iova_batch *batch = (struct iova_batch *)page->private;
+			if (batch->is_huge) {
+				unsigned long offset = (char *)buf - (char *)page_address(batch->huge_page);
+				dma_addr_t iova = batch->iova_base + offset;
+				dma_sync_single_for_cpu(vi->vdev->dev.parent, iova, len, DMA_FROM_DEVICE);
+			}
+		}
 
 		truesize = mergeable_ctx_to_truesize(ctx);
 		if (unlikely(len > truesize)) {
@@ -1565,7 +1575,7 @@ have_buf:
 		put_page(virt_to_head_page(buf));
 		virtnet_release_batch(vi, virt_to_head_page(buf));
 	} else {
-		pr_err("virtio_net: added buf %p iova %llx len %d ref %d\n", buf, iova, len, atomic_read(&batch->ref));
+		// pr_err("virtio_net: added buf %p iova %llx len %d ref %d\n", buf, iova, len, atomic_read(&batch->ref));
 	}
 
 	return err;
@@ -1968,7 +1978,17 @@ static int xmit_skb(struct send_queue *sq, struct sk_buff *skb)
 		hdr->num_buffers = 0;
 
 	sg_init_table(sq->sg, skb_shinfo(skb)->nr_frags + (can_push ? 1 : 2));
-	if (can_push) {
+	/* Sync DMA for CPU access */
+	if (page->private) {
+		struct iova_batch *batch = (struct iova_batch *)page->private;
+		if (batch->is_huge) {
+			unsigned long offset = (char *)buf - (char *)page_address(batch->huge_page);
+			dma_addr_t iova = batch->iova_base + offset;
+			dma_sync_single_for_cpu(vi->vdev->dev.parent, iova, len, DMA_FROM_DEVICE);
+		}
+	}
+
+	if (can_build_skb(vi, len)) {
 		__skb_push(skb, hdr_len);
 		num_sg = skb_to_sgvec(skb, sq->sg, 0, skb->len);
 		if (unlikely(num_sg < 0))
