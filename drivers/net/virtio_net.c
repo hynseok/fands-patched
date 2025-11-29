@@ -1532,6 +1532,7 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 				/* Success! Create new batch */
 				batch = kzalloc(sizeof(*batch), gfp);
 				if (!batch) {
+					struct iommu_domain *domain = iommu_get_dma_domain(vi->vdev->dev.parent);
 					iommu_unmap(domain, iova_base, 2 * 1024 * 1024);
 					iommu_dma_free_iova(domain->iova_cookie, iova_base, 2 * 1024 * 1024, NULL);
 					__free_pages(huge_page, 9);
