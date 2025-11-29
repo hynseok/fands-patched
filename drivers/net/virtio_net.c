@@ -814,7 +814,7 @@ static struct sk_buff *receive_small(struct net_device *dev,
 	unsigned int metasize = 0;
 
 	len -= vi->hdr_len;
-	stats->bytes += len;
+	stats->bytes += len;2
 
 	if (unlikely(len > GOOD_PACKET_LEN)) {
 		pr_debug("%s: rx error: len %u exceeds max size %d\n",
@@ -1854,7 +1854,6 @@ static int virtnet_receive(struct receive_queue *rq, int budget,
 
 		while (stats.packets < budget &&
 		       (buf = virtqueue_get_buf_ctx(rq->vq, &len, &ctx))) {
-			virtnet_release_batch(vi, virt_to_head_page(buf));
 			receive_buf(vi, rq, buf, len, ctx, xdp_xmit, &stats);
 			stats.packets++;
 		}
