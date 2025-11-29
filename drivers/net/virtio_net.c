@@ -1532,7 +1532,8 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 				/* Success! Create new batch */
 				batch = kzalloc(sizeof(*batch), gfp);
 				if (!batch) {
-					dma_unmap_page_attrs(vi->vdev->dev.parent, iova_base, 2 * 1024 * 1024, DMA_FROM_DEVICE, DMA_ATTR_SKIP_CPU_SYNC);
+					iommu_unmap(domain, iova_base, 2 * 1024 * 1024);
+					iommu_dma_free_iova(domain->iova_cookie, iova_base, 2 * 1024 * 1024, NULL);
 					__free_pages(huge_page, 9);
 					put_page(virt_to_head_page(buf));
 					return -ENOMEM;
@@ -1635,7 +1636,9 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 				if (iommu_map_atomic(domain, iova, 0, phys, PAGE_SIZE, IOMMU_READ | IOMMU_WRITE)) {
 					pr_err("virtio_net: fallback batch map failed at index %d\n", i);
 					/* Unmap what we mapped so far */
-					iommu_dma_free_iova(domain->iova_cookie, iova_base, i * PAGE_SIZE, NULL);
+					if (i > 0)
+						iommu_unmap(domain, iova_base, i * PAGE_SIZE);
+					iommu_dma_free_iova(domain->iova_cookie, iova_base, 512 * PAGE_SIZE, NULL);
 					/* Free remaining pages */
 					for (i = 0; i < 512; i++)
 						__free_page(batch->pages[i]);
