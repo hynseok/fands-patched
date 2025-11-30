@@ -1805,6 +1805,7 @@ static void virtnet_release_batch(struct virtnet_info *vi, struct receive_queue 
 	int i;
 
 	if (page->private & 1UL) {
+		get_page(page); /* Protect against caller's put_page */
 		batch = (struct iova_batch *)(page->private & ~1UL);
 		if (batch) {
 			if (atomic_dec_and_test(&batch->ref)) {
