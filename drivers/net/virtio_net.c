@@ -1807,16 +1807,22 @@ static void virtnet_release_batch(struct virtnet_info *vi, struct receive_queue 
 	if (page->private & 1UL) {
 		batch = (struct iova_batch *)(page->private & ~1UL);
 		if (batch) {
-			if (atomic_dec_and_test(&batch->ref)) {
+			int ref = atomic_dec_return(&batch->ref);
+			if (ref == 0) {
 				/* Try to recycle huge batch */
 				if (batch->is_huge && page_count(batch->huge_page) <= 2) {
 					if (rq && !rq->spare_batch) {
 						/* Recycle! */
+						pr_err("virtio_net: recycling batch iova=%llx page_count=%d\n", 
+						       batch->iova_base, page_count(batch->huge_page));
 						atomic_set(&batch->ref, 0);
 						rq->spare_batch = batch;
 						return;
 					}
 				}
+				
+				pr_err("virtio_net: freeing batch iova=%llx page_count=%d is_huge=%d\n", 
+				       batch->iova_base, page_count(batch->huge_page), batch->is_huge);
 
 				/* Unmap the batch */
 				page->private = 0; /* Clear private data */
