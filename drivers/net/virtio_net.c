@@ -1620,8 +1620,9 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 		atomic_set(&batch->ref, 0);
 		rq->cur_batch = batch;
 		rq->batch_offset = 512 * PAGE_SIZE; /* Mark as full so we don't try to resume it */
-
-		pr_err("virtio_net: created fallback batch iova=%llx size=%zu\n", batch->iova_base, batch->size);
+		
+		pr_err("virtio_net: created fallback batch iova=%llx size=%zu ref=%d\n", 
+		       batch->iova_base, batch->size, atomic_read(&batch->ref));
 
 		/* Add buffers to VQ */
 		ctx = mergeable_len_to_ctx(PAGE_SIZE, headroom);
@@ -1807,7 +1808,9 @@ static void virtnet_release_batch(struct virtnet_info *vi, struct receive_queue 
 	if (page->private & 1UL) {
 		batch = (struct iova_batch *)(page->private & ~1UL);
 		if (batch) {
-			if (atomic_dec_and_test(&batch->ref)) {
+			int ref = atomic_dec_return(&batch->ref);
+			if (ref == 0) {
+				pr_err("virtio_net: freeing batch iova=%llx\n", batch->iova_base);
 				/* Try to recycle huge batch */
 				if (batch->is_huge && page_count(batch->huge_page) == 1) {
 					if (rq && !rq->spare_batch) {
