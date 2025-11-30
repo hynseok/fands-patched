@@ -1699,6 +1699,67 @@ have_buf:
  * before we're receiving packets, or from refill_work which is
  * careful to disable receiving (using napi_disable).
  */
+static void virtnet_prefill_batches(struct virtnet_info *vi, struct receive_queue *rq)
+{
+	int i;
+
+	/* Only prefill if we are using mergeable buffers and hugepages are relevant */
+	if (!vi->mergeable_rx_bufs)
+		return;
+
+	/* Prefill 4 batches (8MB) per queue */
+	for (i = 0; i < 4; i++) {
+		struct iova_batch *batch;
+		struct page *huge_page;
+		dma_addr_t iova_base;
+
+		huge_page = alloc_pages(GFP_KERNEL | __GFP_COMP | __GFP_NOWARN | __GFP_NORETRY, 9);
+		if (!huge_page)
+			break;
+
+		iova_base = iommu_dma_alloc_iova(iommu_get_dma_domain(vi->vdev->dev.parent),
+						 2 * 1024 * 1024,
+						 dma_get_mask(vi->vdev->dev.parent),
+						 vi->vdev->dev.parent);
+		if (!iova_base) {
+			__free_pages(huge_page, 9);
+			break;
+		}
+
+		/* Manual map with sync_size=2MB to ensure IOTLB flush */
+		struct iommu_domain *domain = iommu_get_dma_domain(vi->vdev->dev.parent);
+		if (iommu_map_atomic(domain, iova_base, 2 * 1024 * 1024, page_to_phys(huge_page), 2 * 1024 * 1024, IOMMU_READ | IOMMU_WRITE)) {
+			iommu_dma_free_iova(domain->iova_cookie, iova_base, 2 * 1024 * 1024, NULL);
+			__free_pages(huge_page, 9);
+			break;
+		}
+
+		batch = kzalloc(sizeof(*batch), GFP_KERNEL);
+		if (!batch) {
+			iommu_unmap(domain, iova_base, 2 * 1024 * 1024);
+			iommu_dma_free_iova(domain->iova_cookie, iova_base, 2 * 1024 * 1024, NULL);
+			__free_pages(huge_page, 9);
+			break;
+		}
+
+		batch->is_huge = true;
+		batch->huge_page = huge_page;
+		batch->iova_base = iova_base;
+		batch->size = 2 * 1024 * 1024;
+		atomic_set(&batch->ref, 0);
+		batch->rq = rq;
+
+		/* Link page to batch for cleanup */
+		huge_page->private = (unsigned long)batch | 1UL;
+
+		/* Add to free list */
+		batch->next = rq->free_batches;
+		rq->free_batches = batch;
+		
+		pr_info("virtio_net: prefilled huge batch iova=%llx\n", batch->iova_base);
+	}
+}
+
 static bool try_fill_recv(struct virtnet_info *vi, struct receive_queue *rq,
 			  gfp_t gfp)
 {
@@ -1999,10 +2060,14 @@ static int virtnet_open(struct net_device *dev)
 	enable_delayed_refill(vi);
 
 	for (i = 0; i < vi->max_queue_pairs; i++) {
-		if (i < vi->curr_queue_pairs)
+		if (i < vi->curr_queue_pairs) {
+			/* Prefill hugepage batches */
+			virtnet_prefill_batches(vi, &vi->rq[i]);
+
 			/* Make sure we have some buffers: if oom use wq. */
 			if (!try_fill_recv(vi, &vi->rq[i], GFP_KERNEL))
 				schedule_delayed_work(&vi->refill, 0);
+		}
 
 		err = xdp_rxq_info_reg(&vi->rq[i].xdp_rxq, dev, i, vi->rq[i].napi.napi_id);
 		if (err < 0)
