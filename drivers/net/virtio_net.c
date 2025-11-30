@@ -1703,13 +1703,9 @@ static void virtnet_prefill_batches(struct virtnet_info *vi, struct receive_queu
 {
 	int i;
 
-	pr_err("virtio_net: virtnet_prefill_batches called\n");
-
 	/* Only prefill if we are using mergeable buffers and hugepages are relevant */
-	if (!vi->mergeable_rx_bufs) {
-		pr_err("virtio_net: prefill skipped, mergeable=%d\n", vi->mergeable_rx_bufs);
+	if (!vi->mergeable_rx_bufs)
 		return;
-	}
 
 	/* Prefill 4 batches (8MB) per queue */
 	for (i = 0; i < 4; i++) {
@@ -1718,17 +1714,14 @@ static void virtnet_prefill_batches(struct virtnet_info *vi, struct receive_queu
 		dma_addr_t iova_base;
 
 		huge_page = alloc_pages(GFP_KERNEL | __GFP_COMP | __GFP_NOWARN | __GFP_NORETRY, 9);
-		if (!huge_page) {
-			pr_err("virtio_net: prefill alloc_pages failed at index %d\n", i);
+		if (!huge_page)
 			break;
-		}
 
 		iova_base = iommu_dma_alloc_iova(iommu_get_dma_domain(vi->vdev->dev.parent),
 						 2 * 1024 * 1024,
 						 dma_get_mask(vi->vdev->dev.parent),
 						 vi->vdev->dev.parent);
 		if (!iova_base) {
-			pr_err("virtio_net: prefill iova alloc failed at index %d\n", i);
 			__free_pages(huge_page, 9);
 			break;
 		}
@@ -1736,7 +1729,6 @@ static void virtnet_prefill_batches(struct virtnet_info *vi, struct receive_queu
 		/* Manual map with sync_size=2MB to ensure IOTLB flush */
 		struct iommu_domain *domain = iommu_get_dma_domain(vi->vdev->dev.parent);
 		if (iommu_map_atomic(domain, iova_base, 2 * 1024 * 1024, page_to_phys(huge_page), 2 * 1024 * 1024, IOMMU_READ | IOMMU_WRITE)) {
-			pr_err("virtio_net: prefill map failed at index %d\n", i);
 			iommu_dma_free_iova(domain->iova_cookie, iova_base, 2 * 1024 * 1024, NULL);
 			__free_pages(huge_page, 9);
 			break;
@@ -1744,7 +1736,6 @@ static void virtnet_prefill_batches(struct virtnet_info *vi, struct receive_queu
 
 		batch = kzalloc(sizeof(*batch), GFP_KERNEL);
 		if (!batch) {
-			pr_err("virtio_net: prefill batch alloc failed at index %d\n", i);
 			iommu_unmap(domain, iova_base, 2 * 1024 * 1024);
 			iommu_dma_free_iova(domain->iova_cookie, iova_base, 2 * 1024 * 1024, NULL);
 			__free_pages(huge_page, 9);
@@ -1764,8 +1755,6 @@ static void virtnet_prefill_batches(struct virtnet_info *vi, struct receive_queu
 		/* Add to free list */
 		batch->next = rq->free_batches;
 		rq->free_batches = batch;
-		
-		pr_info("virtio_net: prefilled huge batch iova=%llx\n", batch->iova_base);
 	}
 }
 
@@ -1775,14 +1764,9 @@ static bool try_fill_recv(struct virtnet_info *vi, struct receive_queue *rq,
 	int err;
 	bool oom;
 
-	pr_err("virtio_net: try_fill_recv entry mergeable=%d big=%d gfp=0x%x free_batches=%p\n", 
-		vi->mergeable_rx_bufs, vi->big_packets, gfp, rq->free_batches);
-
 	/* Try to replenish hugepage batches if we can sleep and have none */
-	if (vi->mergeable_rx_bufs && (gfp & __GFP_DIRECT_RECLAIM) && !rq->free_batches) {
-		pr_err("virtio_net: try_fill_recv triggering prefill\n");
+	if (vi->mergeable_rx_bufs && (gfp & __GFP_DIRECT_RECLAIM) && !rq->free_batches)
 		virtnet_prefill_batches(vi, rq);
-	}
 
 	//gfp |= __GFP_COLD;
 	do {
