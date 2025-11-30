@@ -1775,7 +1775,8 @@ static bool try_fill_recv(struct virtnet_info *vi, struct receive_queue *rq,
 	int err;
 	bool oom;
 
-	pr_err("virtio_net: try_fill_recv entry mergeable=%d big=%d\n", vi->mergeable_rx_bufs, vi->big_packets);
+	pr_err("virtio_net: try_fill_recv entry mergeable=%d big=%d gfp=0x%x free_batches=%p\n", 
+		vi->mergeable_rx_bufs, vi->big_packets, gfp, rq->free_batches);
 
 	/* Try to replenish hugepage batches if we can sleep and have none */
 	if (vi->mergeable_rx_bufs && (gfp & __GFP_DIRECT_RECLAIM) && !rq->free_batches) {
@@ -2076,6 +2077,9 @@ static int virtnet_open(struct net_device *dev)
 
 	for (i = 0; i < vi->max_queue_pairs; i++) {
 		if (i < vi->curr_queue_pairs) {
+			/* Prefill hugepage batches */
+			virtnet_prefill_batches(vi, &vi->rq[i]);
+
 			/* Make sure we have some buffers: if oom use wq. */
 			if (!try_fill_recv(vi, &vi->rq[i], GFP_KERNEL))
 				schedule_delayed_work(&vi->refill, 0);
