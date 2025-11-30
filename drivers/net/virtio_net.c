@@ -1214,6 +1214,8 @@ err_xdp:
 	rcu_read_unlock();
 	stats->xdp_drops++;
 err_skb:
+	if (vi->mergeable_rx_bufs && (page->private & 1UL))
+		virtnet_release_batch(vi, rq, page);
 	put_page(page);
 	while (num_buf-- > 1) {
 		buf = virtqueue_get_buf(rq->vq, &len);
