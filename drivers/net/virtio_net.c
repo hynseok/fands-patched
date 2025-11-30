@@ -155,6 +155,8 @@ struct iova_batch {
 	struct page *huge_page;
 	struct page **pages;
 	int num_pages;
+	struct iova_batch *next;
+	struct receive_queue *rq;
 };
 
 struct receive_queue {
@@ -191,6 +193,7 @@ struct receive_queue {
 	u32 batch_offset;
 	unsigned long last_mapped_pfn;
 	dma_addr_t last_mapped_iova;
+	struct iova_batch *free_batches;
 };
 
 /* This structure can contain rss message with maximum settings for indirection table and keysize
@@ -1454,8 +1457,23 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 
 	/* Step 2: Try to allocate new Hugepage */
 
-	/* Try to allocate new Hugepage */
+	/* Try to recycle first */
 	if (!batch || (batch->is_huge && rq->batch_offset >= batch->size)) {
+		if (rq->free_batches) {
+			batch = rq->free_batches;
+			rq->free_batches = batch->next;
+			batch->next = NULL;
+			atomic_set(&batch->ref, 0);
+			rq->cur_batch = batch;
+			rq->batch_offset = 0;
+			
+			/* Use it */
+			buf = (char *)page_address(batch->huge_page);
+			get_page(batch->huge_page);
+			rq->batch_offset += len + room;
+			goto have_buf;
+		}
+
 		struct page *huge_page = alloc_pages(gfp | __GFP_COMP | __GFP_NOWARN | __GFP_NORETRY, 9);
 		if (huge_page) {
 			dma_addr_t iova_base = iommu_dma_alloc_iova(iommu_get_dma_domain(vi->vdev->dev.parent),
@@ -1484,6 +1502,7 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 				batch->iova_base = iova_base;
 				batch->size = 2 * 1024 * 1024;
 				atomic_set(&batch->ref, 0);
+				batch->rq = rq;
 				
 				pr_err("virtio_net: created huge batch iova=%llx size=%zu\n", batch->iova_base, batch->size);
 
@@ -1787,6 +1806,13 @@ static void virtnet_release_batch(struct virtnet_info *vi, struct page *page)
 
 	if (batch) {
 		if (atomic_dec_and_test(&batch->ref)) {
+			/* Recycle hugepage batches */
+			if (batch->is_huge && batch->rq) {
+				batch->next = batch->rq->free_batches;
+				batch->rq->free_batches = batch;
+				return;
+			}
+
 			/* Unmap the batch */
 			page->private = 0; /* Clear private data */
 			if (batch->is_huge) {
@@ -3618,6 +3644,22 @@ static void _free_receive_bufs(struct virtnet_info *vi)
 	for (i = 0; i < vi->max_queue_pairs; i++) {
 		while (vi->rq[i].pages)
 			__free_pages(get_a_page(&vi->rq[i], GFP_KERNEL), 0);
+
+		/* Cleanup recycled batches */
+		while (vi->rq[i].free_batches) {
+			struct iova_batch *batch = vi->rq[i].free_batches;
+			vi->rq[i].free_batches = batch->next;
+			
+			if (batch->is_huge) {
+				dma_unmap_page_attrs(vi->vdev->dev.parent,
+						     batch->iova_base,
+						     batch->size,
+						     DMA_FROM_DEVICE,
+						     DMA_ATTR_SKIP_CPU_SYNC);
+				__free_pages(batch->huge_page, 9);
+			}
+			kfree(batch);
+		}
 
 		old_prog = rtnl_dereference(vi->rq[i].xdp_prog);
 		RCU_INIT_POINTER(vi->rq[i].xdp_prog, NULL);
