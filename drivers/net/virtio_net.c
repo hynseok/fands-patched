@@ -1707,8 +1707,8 @@ static void virtnet_prefill_batches(struct virtnet_info *vi, struct receive_queu
 	if (!vi->mergeable_rx_bufs)
 		return;
 
-	/* Prefill 4 batches (8MB) per queue */
-	for (i = 0; i < 4; i++) {
+	/* Prefill 32 batches (64MB) per queue */
+	for (i = 0; i < 32; i++) {
 		struct iova_batch *batch;
 		struct page *huge_page;
 		dma_addr_t iova_base;
