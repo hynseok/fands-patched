@@ -1486,7 +1486,14 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 			}
 			batch->iova_base = iova_base;
 
-			atomic_set(&batch->ref, 0);
+			atomic_set(&batch->ref, 1); /* 1 for cur_batch ownership */
+			
+			/* Release old batch ownership if exists */
+			if (rq->cur_batch) {
+				struct page *p = rq->cur_batch->is_huge ? rq->cur_batch->huge_page : rq->cur_batch->pages[0];
+				virtnet_release_batch(vi, p);
+			}
+
 			rq->cur_batch = batch;
 			rq->batch_offset = 0;
 			
@@ -1524,13 +1531,19 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 				batch->huge_page = huge_page;
 				batch->iova_base = iova_base;
 				batch->size = 2 * 1024 * 1024;
-				atomic_set(&batch->ref, 0);
+				atomic_set(&batch->ref, 1); /* 1 for cur_batch ownership */
 				batch->rq = rq;
 				
 				pr_err("virtio_net: created huge batch iova=%llx size=%zu\n", batch->iova_base, batch->size);
 
 				/* Link page to batch for cleanup */
 				huge_page->private = (unsigned long)batch | 1UL;
+
+				/* Release old batch ownership if exists */
+				if (rq->cur_batch) {
+					struct page *p = rq->cur_batch->is_huge ? rq->cur_batch->huge_page : rq->cur_batch->pages[0];
+					virtnet_release_batch(vi, p);
+				}
 
 				rq->cur_batch = batch;
 				rq->batch_offset = 0;
@@ -1607,17 +1620,17 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 		{
 			struct iommu_domain *domain = iommu_get_dma_domain(vi->vdev->dev.parent);
 			for (i = 0; i < 512; i++) {
-				dma_addr_t iova = iova_base + i * PAGE_SIZE;
+				dma_addr_t current_iova = iova_base + i * PAGE_SIZE;
 				phys_addr_t phys = page_to_phys(batch->pages[i]);
-				if (iommu_map_atomic(domain, iova, 0, phys, PAGE_SIZE, IOMMU_READ | IOMMU_WRITE)) {
+				if (iommu_map_atomic(domain, current_iova, 0, phys, PAGE_SIZE, IOMMU_READ | IOMMU_WRITE)) {
 					pr_err("virtio_net: fallback batch map failed at index %d\n", i);
 					/* Unmap what we mapped so far */
-					if (i > 0)
-						iommu_unmap(domain, iova_base, i * PAGE_SIZE);
+					for (j = 0; j < i; j++)
+						iommu_unmap(domain, iova_base + j * PAGE_SIZE, PAGE_SIZE);
 					iommu_dma_free_iova(domain->iova_cookie, iova_base, 512 * PAGE_SIZE, NULL);
 					/* Free remaining pages */
-					for (i = 0; i < 512; i++)
-						__free_page(batch->pages[i]);
+					for (j = 0; j < 512; j++)
+						__free_page(batch->pages[j]);
 					kfree(batch->pages);
 					kfree(batch);
 					return -ENOMEM;
@@ -1642,7 +1655,13 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 		batch->iova_base = iova_base;
 		batch->size = 512 * PAGE_SIZE;
 		batch->num_pages = 512;
-		atomic_set(&batch->ref, 0);
+		atomic_set(&batch->ref, 1); /* 1 for cur_batch ownership */
+		batch->rq = rq;
+		
+		/* Release old batch ownership if exists */
+		if (rq->cur_batch)
+			virtnet_release_batch(vi, virt_to_head_page(page_address(rq->cur_batch->is_huge ? rq->cur_batch->huge_page : rq->cur_batch->pages[0])));
+
 		rq->cur_batch = batch;
 		rq->batch_offset = 512 * PAGE_SIZE; /* Mark as full so we don't try to resume it */
 
