@@ -1868,11 +1868,13 @@ static void virtnet_release_batch(struct virtnet_info *vi, struct page *page)
 	if (batch) {
 		if (atomic_dec_and_test(&batch->ref)) {
 			/* Recycle hugepage batches */
+			/*
 			if (batch->is_huge && batch->rq) {
 				batch->next = batch->rq->free_batches;
 				batch->rq->free_batches = batch;
 				return;
 			}
+			*/
 
 			/* Unmap the batch */
 			page->private = 0; /* Clear private data */
