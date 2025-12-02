@@ -1463,6 +1463,29 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 			batch = rq->free_batches;
 			rq->free_batches = batch->next;
 			batch->next = NULL;
+
+			/* Remap the hugepage (Simulate Strict Mode Overhead) */
+			dma_addr_t iova_base = iommu_dma_alloc_iova(iommu_get_dma_domain(vi->vdev->dev.parent),
+							    2 * 1024 * 1024,
+							    dma_get_mask(vi->vdev->dev.parent),
+							    vi->vdev->dev.parent);
+			if (!iova_base) {
+				/* Failed to alloc IOVA, put batch back and fallback */
+				batch->next = rq->free_batches;
+				rq->free_batches = batch;
+				goto try_fallback;
+			}
+
+			struct iommu_domain *domain = iommu_get_dma_domain(vi->vdev->dev.parent);
+			if (iommu_map_atomic(domain, iova_base, 2 * 1024 * 1024, page_to_phys(batch->huge_page), 2 * 1024 * 1024, IOMMU_READ | IOMMU_WRITE)) {
+				/* Failed to map, free IOVA, put batch back and fallback */
+				iommu_dma_free_iova(domain->iova_cookie, iova_base, 2 * 1024 * 1024, NULL);
+				batch->next = rq->free_batches;
+				rq->free_batches = batch;
+				goto try_fallback;
+			}
+			batch->iova_base = iova_base;
+
 			atomic_set(&batch->ref, 0);
 			rq->cur_batch = batch;
 			rq->batch_offset = 0;
@@ -1522,6 +1545,7 @@ static int add_recvbuf_mergeable(struct virtnet_info *vi,
 		}
 	}
 
+	try_fallback:
 	/* Fallback to F&S Batching with iommu_map_sg_atomic */
 	{
 		dma_addr_t iova_base;
@@ -1868,13 +1892,18 @@ static void virtnet_release_batch(struct virtnet_info *vi, struct page *page)
 	if (batch) {
 		if (atomic_dec_and_test(&batch->ref)) {
 			/* Recycle hugepage batches */
-			/*
 			if (batch->is_huge && batch->rq) {
+				/* Unmap to force IOTLB flush */
+				dma_unmap_page_attrs(vi->vdev->dev.parent,
+						     batch->iova_base,
+						     batch->size,
+						     DMA_FROM_DEVICE,
+						     DMA_ATTR_SKIP_CPU_SYNC);
+
 				batch->next = batch->rq->free_batches;
 				batch->rq->free_batches = batch;
 				return;
 			}
-			*/
 
 			/* Unmap the batch */
 			page->private = 0; /* Clear private data */
